@@ -1,15 +1,9 @@
-# Logged-in browser profiles - never commit
-accounts/
-# Participant data and local databases
-study_sessions.db
-*.db
-*.db-wal
-*.db-shm
-# Debug artifacts from send_dm.py
-*_failed.png
-*_failed_dom.txt
-chat_dom_dump.txt
-# Python
+venv/
 __pycache__/
 *.pyc
-.env
+accounts/
+*.png
+chat_dom_dump.txt
+contacted.csv
+step*_failed_dom.txt
+study_sessions.db
