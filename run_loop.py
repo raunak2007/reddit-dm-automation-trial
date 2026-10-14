@@ -1,19 +1,20 @@
 """run_loop.py - send DMs on a loop, respecting config.json limits.
 
 Reads:
-    config.json        daily_limit_per_account, min/max delays, subject_template, message_template
-    <queue.html>       if given: each entry's own recipient, subject and personalized message
+    config.json        sender_username, daily_limit_per_account, min/max delays, subject_template,
+                       message_template, max_attempts_per_recipient (optional, default 3)
+    <queue.html>       if given: each entry's compose link, used exactly as written (entries whose link,
+                       checkbox, heading and <pre> body disagree are reported and not sent)
     target_users.csv   if no queue is given: one username per row (header row "username"),
                        messaged with config.json's subject_template / message_template
     contacted.csv      every attempt and its outcome (see ledger.py); shared with open_queue.py
 
-Already-sent recipients, users Reddit says don't exist and bad entries are skipped; errors and
-refusals (Reddit didn't say whether the recipient or this account was the cause) are retried on later
-runs, up to max_attempts_per_recipient.
-"Already sent" includes everyone in the account's Reddit sent messages (checked at the start of every
-run; no sending if that check fails) and a queue page's imported Sent checkmarks (see ledger.py).
-The run stops (exit code 2) as soon as Reddit refuses the account itself, or after 3 errors or 3
-refusals in a row.
+Each run: takes a lock (one run at a time), checks the browser is logged in as sender_username, records
+everyone in that account's Reddit sent folder, then for each eligible entry opens the compose link, checks
+the prefilled fields, clicks Send once, and records 'sent' only once the message is in the sent folder.
+A send that can't be confirmed is recorded 'uncertain' and held until you resolve it (python ledger.py held).
+The run stops (exit code 2) on any account-wide problem (login, rate limit, restriction) and on streaks of
+failures, refusals or uncertain sends.
 
 Run:
     python run_loop.py <queue.html> [--no-checkmarks]
@@ -22,9 +23,7 @@ Run:
 import argparse
 import csv
 import json
-import random
 import sys
-import time
 from pathlib import Path
 
 import undetected_chromedriver as uc
@@ -32,7 +31,7 @@ from chrome_version import chrome_major
 
 import ledger
 from open_queue import parse_queue
-from send_dm import COMPOSE_URL, DEFAULT_SUBJECT, Result, compose_link
+from send_dm import DEFAULT_SUBJECT, compose_link
 
 HERE = Path(__file__).resolve().parent
 PROFILE = HERE / "accounts" / "account_1" / "chrome_profile"
@@ -46,13 +45,20 @@ def load_config():
 
 
 def load_targets(cfg, queue=None):
-    """[(username, subject, message)] from the queue file, or from target_users.csv + config templates."""
+    """[(username, compose_link)]. Queue links are taken exactly as written; CSV targets get a link built
+    from config.json's templates."""
     if queue:
-        return [(e["to"], e["subject"], e["message"]) for e in parse_queue(queue)]
+        return [(e["to"], e["link"]) for e in parse_queue(queue) if not e["problem"]]
     with open(TARGETS, newline="") as f:
         names = [row["username"].strip() for row in csv.DictReader(f) if row.get("username", "").strip()]
     subject = cfg.get("subject_template", DEFAULT_SUBJECT)
-    return [(u, subject.format(username=u), cfg["message_template"].format(username=u)) for u in names]
+    targets = []
+    for u in names:
+        try:
+            targets.append((u, compose_link(u, cfg["message_template"].format(username=u), subject.format(username=u))))
+        except ValueError as exc:
+            print(f"[!] u/{u}: {exc}; not sending", file=sys.stderr)
+    return targets
 
 
 def main():
@@ -71,39 +77,23 @@ def main():
     cfg = load_config()
     targets = load_targets(cfg, args.queue)
     if not targets:
-        raise SystemExit("No targets found.")
-    links = []
-    for username, subject, message in targets:
-        try:
-            links.append((username, compose_link(username, message, subject)))
-        except ValueError as exc:
-            if not ledger.skip_reason(username):
-                print(f"[!] u/{username}: {exc}")
-                ledger.record(username, Result("invalid", str(exc)))
+        raise SystemExit("No sendable targets found.")
     cap = cfg["daily_limit_per_account"]
-    if ledger.sent_today() >= cap:
-        raise SystemExit(f"Already sent {ledger.sent_today()}/{cap} today. Nothing to do until tomorrow.")
 
-    options = uc.ChromeOptions()
-    options.add_argument(f"--user-data-dir={PROFILE}")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    driver = uc.Chrome(options=options, version_main=chrome_major())
-
-    try:
-        driver.set_window_size(1400, 900)
-        driver.get(COMPOSE_URL)
-        time.sleep(random.uniform(4, 7))
-        if "login" in driver.current_url:
-            raise SystemExit("Not logged in. Run test_connection.py and log in manually first.")
+    with ledger.lock():
+        if ledger.sent_today() >= cap:
+            raise SystemExit(f"Already sent {ledger.sent_today()}/{cap} today. Nothing to do until tomorrow.")
+        options = uc.ChromeOptions()
+        options.add_argument(f"--user-data-dir={PROFILE}")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        driver = uc.Chrome(options=options, version_main=chrome_major())
         try:
-            ledger.sync_reddit_sent(driver)
-        except RuntimeError as exc:
-            raise SystemExit(f"Not sending: {exc}")
-
-        counts = ledger.send_loop(driver, links, cfg)
-    finally:
-        driver.quit()
+            driver.set_window_size(1400, 900)
+            sender = ledger.prepare(driver, cfg)
+            counts = ledger.send_loop(driver, targets, cfg, sender)
+        finally:
+            driver.quit()
     sys.exit(ledger.report(counts))
 
 

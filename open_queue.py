@@ -1,21 +1,20 @@
 """open_queue.py - walk a DM queue and open each compose link for a human to send.
 
-By default this does NOT submit anything. It reads a queue HTML file (the format with one
-<li class=c> per entry, a reddit.com/message/compose/ link, and a
-<input type=checkbox data-u=...> Sent marker), opens the next unsent entry's
-compose link in a persistent Chrome profile, and waits for you to press Enter
-after you have clicked Send yourself in the browser. Entries you mark sent are
-recorded in contacted.csv (ledger.py, shared with run_loop.py), and your place
-in the queue is kept in queue_state/<queue>.json.
+By default this does NOT submit anything. It reads a queue HTML file (one <li class=c> per entry, with
+an a.b reddit.com/message/compose/ link, a <pre> body and an input[data-u] Sent checkbox), opens the
+next eligible entry's compose link exactly as written, and waits for you to click Send yourself. When
+you say it's sent, it looks for the message in the account's sent folder: found -> recorded 'sent',
+not found -> recorded 'uncertain' and held. Results go to contacted.csv (ledger.py, shared with
+run_loop.py); your place in the queue is kept in queue_state/<queue>.json.
 
-With --send it submits each entry's compose link itself, via the same loop as
-run_loop.py: config.json's daily cap and delays, skipping anyone already sent or
-nonexistent, and stopping (exit code 2) if Reddit refuses the account or several
-recipients in a row.
+With --send it submits each entry itself, via the same loop as run_loop.py (check prefilled fields,
+click Send once, confirm in the sent folder; stop on account-wide problems; hold uncertain sends).
 
-Before either mode opens anything, everyone in the account's Reddit sent messages is recorded as
-sent (no sending if that check fails), and the queue page's own Sent checkmarks must have been
-imported once with `python ledger.py import-checkmarks` (or pass --no-checkmarks).
+Entries whose link, checkbox, heading or <pre> body disagree are reported and never opened. Before
+either mode opens anything it takes a lock (one run at a time), checks the browser is logged in as
+config.json's sender_username, and records everyone in that account's sent folder; the queue page's
+own Sent checkmarks must have been imported once with `python ledger.py import-checkmarks` (or pass
+--no-checkmarks).
 
 Usage:
     python open_queue.py <queue.html> [--profile account_1] [--reset]
@@ -32,59 +31,113 @@ Options:
 from __future__ import annotations
 
 import argparse
-import html as html_mod
 import json
 import re
 import sys
 import time
-import urllib.parse
+from collections import Counter
+from html.parser import HTMLParser
 from pathlib import Path
 
 import undetected_chromedriver as uc
 from chrome_version import chrome_major
 
 import ledger
-from send_dm import Result, compose_link
+from send_dm import NotInSent, Result, parse_compose_link, verify_in_sent
 
 HERE = Path(__file__).resolve().parent
 STATE_DIR = HERE / "queue_state"
 CONFIG = HERE / "config.json"
 
-CARD_RE = re.compile(r"<li class=c>(.*?)</li>", re.S)
-LINK_RE = re.compile(r'href="(https://www\.reddit\.com/message/compose/\?[^"]+)"')
-DATA_U_RE = re.compile(r'data-u="([^"]+)"')
-PRE_RE = re.compile(r"<pre[^>]*>(.*?)</pre>", re.S)
+class _QueueHTML(HTMLParser):
+    """Collects, per <li class=c>: the a.b href, the <pre> text, the input[data-u] and the .h handle."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)          # entities in text and attributes are decoded
+        self.cards, self.card, self.pre, self.bold = [], None, None, None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        classes = (a.get("class") or "").split()
+        if tag == "li" and "c" in classes:
+            self.card = {"href": None, "pre": None, "data_u": None, "handle": None, "hrefs": 0}
+            self.cards.append(self.card)
+        elif self.card is None:
+            return
+        elif tag == "a" and "b" in classes:
+            self.card["hrefs"] += 1
+            self.card["href"] = self.card["href"] or a.get("href")
+        elif tag == "pre":
+            self.pre = []
+        elif tag == "input" and "data-u" in a:
+            self.card["data_u"] = a["data-u"]
+        elif tag == "b" and self.card["handle"] is None:
+            self.bold = []
+
+    def handle_data(self, data):
+        if self.pre is not None:
+            self.pre.append(data)
+        if self.bold is not None:
+            self.bold.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "pre" and self.pre is not None and self.card is not None:
+            self.card["pre"] = "".join(self.pre)
+            self.pre = None
+        elif tag == "b" and self.bold is not None:
+            m = re.search(r"u/([A-Za-z0-9_-]+)", "".join(self.bold))
+            self.card["handle"] = m and m.group(1)
+            self.bold = None
+        elif tag == "li":
+            self.card = None
+
+
+def _body(text):
+    """Line endings normalized and the outer whitespace HTML adds around <pre> removed; nothing else."""
+    return (text or "").replace("\r\n", "\n").strip()
 
 
 def parse_queue(path: Path):
-    raw = path.read_text(encoding="utf-8")
+    """Every entry with its compose link exactly as written in the HTML, plus the recipient, subject and
+    body that link carries. An entry whose parts disagree (link vs checkbox vs heading recipient, link
+    vs <pre> body, a subject unlike every other entry's) gets a 'problem' and must not be sent."""
+    parser = _QueueHTML()
+    parser.feed(path.read_text(encoding="utf-8"))
     entries = []
-    for i, card in enumerate(CARD_RE.findall(raw), 1):
-        link_m = LINK_RE.search(card)
-        user_m = DATA_U_RE.search(card)
-        if not link_m:
-            print(f"[!] entry {i} has no compose link; skipping", file=sys.stderr)
-            continue
-        link = html_mod.unescape(link_m.group(1))
-        q = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
-        to = user_m.group(1) if user_m else q.get("to", [""])[0]
-        subject = q.get("subject", [""])[0]
-        message = q.get("message", [""])[0]
-        pre_m = PRE_RE.search(card)
-        if pre_m:
-            body = html_mod.unescape(pre_m.group(1)).strip()
-            if " ".join(body.split()) != " ".join(message.split()):
-                print(f"[!] entry {i}: compose link body differs from the <pre> body; "
-                      f"using the <pre> body", file=sys.stderr)
-                message = body
-                link = compose_link(to, message, subject)
-        entries.append({
-            "index": i,
-            "to": to,
-            "subject": subject,
-            "message": message,
-            "link": link,
-        })
+    for i, card in enumerate(parser.cards, 1):
+        e = {"index": i, "to": card["data_u"] or card["handle"] or "", "subject": "", "message": "",
+             "link": card["href"] or "", "problem": None}
+        problems = []
+        if not card["href"]:
+            problems.append("no compose link (a.b)")
+        else:
+            try:
+                want = parse_compose_link(card["href"])
+                e.update(to=want["to"], subject=want["subject"], message=want["message"])
+            except ValueError as exc:
+                problems.append(str(exc))
+        if card["hrefs"] > 1:
+            problems.append(f"{card['hrefs']} compose links")
+        for label, other in (("checkbox data-u", card["data_u"]), ("heading u/", card["handle"])):
+            if other and e["to"] and other.lower() != e["to"].lower():
+                problems.append(f"link is to u/{e['to']} but the {label} says u/{other}")
+        if card["pre"] is None:
+            problems.append("no <pre> body to check the link against")
+        elif card["href"] and _body(card["pre"]) != _body(e["message"]):
+            problems.append("the link's message differs from the <pre> body")
+        if card["href"] and not e["subject"].strip():
+            problems.append("the link has no subject")
+        e["problem"] = "; ".join(problems) or None
+        entries.append(e)
+    subjects = Counter(e["subject"] for e in entries if not e["problem"])
+    if len(subjects) > 1:                                # the subject is meant to be the same for every entry
+        usual = subjects.most_common(1)[0][0]
+        for e in entries:
+            if not e["problem"] and e["subject"] != usual:
+                e["problem"] = f"subject {e['subject']!r} differs from the other entries' {usual!r}"
+    for e in entries:
+        if e["problem"]:
+            print(f"[!] entry {e['index']} (u/{e['to'] or '?'}): {e['problem']}; it won't be sent", file=sys.stderr)
     return entries
 
 
@@ -122,10 +175,17 @@ def make_driver(profile_name: str):
     return driver
 
 
-def send_all(driver, entries: list) -> int:
-    """--send: ledger.send_loop over the queue's compose links. Returns the exit code."""
-    cfg = json.loads(CONFIG.read_text())
-    return ledger.report(ledger.send_loop(driver, [(e["to"], e["link"]) for e in entries], cfg))
+def confirm_by_hand(driver, entry, opened_at, sender):
+    """After you say you clicked Send: record 'sent' if the message is in the sent folder, else 'uncertain'."""
+    want = parse_compose_link(entry["link"])
+    print("    checking the sent folder...")
+    try:
+        verify_in_sent(driver, want, opened_at, sender, timeout=30)
+        ledger.record(entry["to"], Result("sent", "sent by hand; confirmed in the sent folder"))
+        print("    confirmed in the sent folder")
+    except (NotInSent, RuntimeError) as exc:
+        ledger.record(entry["to"], Result("uncertain", f"marked sent by hand, but {exc}"))
+        print(f"    [!] not confirmed ({exc}); recorded as uncertain and HELD. See: python ledger.py held")
 
 
 def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send: bool, no_checkmarks: bool):
@@ -136,7 +196,7 @@ def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send:
 
     if list_only:
         for e in entries:
-            why = ledger.skip_reason(e["to"])
+            why = e["problem"] or (e["to"] and ledger.skip_reason(e["to"]))
             print(f"  {e['index']:>3}. u/{e['to']:<32} subject={e['subject']!r} "
                   f"body={len(e['message'])} chars" + (f"  [skip: {why}]" if why else ""))
         if not ledger.checkmarks_imported(queue_path):
@@ -145,22 +205,26 @@ def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send:
 
     if not no_checkmarks and not ledger.checkmarks_imported(queue_path):
         sys.exit(ledger.checkmark_help(queue_path))
+    with ledger.lock():
+        return walk(queue_path, entries, profile, reset, auto_send)
+
+
+def walk(queue_path: Path, entries: list, profile: str, reset: bool, auto_send: bool) -> int:
+    cfg = json.loads(CONFIG.read_text())
     state = {"cursor": 0} if reset else load_state(queue_path)
     driver = make_driver(profile)
     code = 0
 
     try:
-        try:
-            ledger.sync_reddit_sent(driver)
-        except RuntimeError as exc:
-            sys.exit(f"Not opening anything: {exc}")
+        sender = ledger.prepare(driver, cfg)
         if auto_send:
-            code = send_all(driver, entries)
+            targets = [(e["to"], e["link"]) for e in entries if not e["problem"]]
+            code = ledger.report(ledger.send_loop(driver, targets, cfg, sender))
         while not auto_send and state["cursor"] < len(entries):
             entry = entries[state["cursor"]]
             username = entry["to"]
 
-            why = ledger.skip_reason(username)
+            why = entry["problem"] or ledger.skip_reason(username)
             if why:
                 print(f"[=] skipping u/{username}: {why}")
                 state["cursor"] += 1
@@ -170,6 +234,7 @@ def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send:
             print(f"    subject: {entry['subject']!r}")
             print(f"    body:    {len(entry['message'])} chars")
 
+            opened_at = time.time()
             driver.get(entry["link"])
             time.sleep(1.5)
 
@@ -193,14 +258,14 @@ def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send:
                 save_state(queue_path, state)
                 continue
 
-            # default: treat anything else as "sent"
-            ledger.record(username, Result("sent", "marked sent by hand"))
+            # default: treat anything else as "I clicked Send"
+            confirm_by_hand(driver, entry, opened_at, sender)
             state["cursor"] += 1
             save_state(queue_path, state)
 
         if not auto_send:
-            done = sum(1 for e in entries if ledger.skip_reason(e["to"]))
-            print(f"\n[done] {done} of {len(entries)} entries sent or not sendable; "
+            done = sum(1 for e in entries if e["problem"] or ledger.skip_reason(e["to"]))
+            print(f"\n[done] {done} of {len(entries)} entries sent, held or not sendable; "
                   f"{ledger.sent_today()} sent today in total.")
             print(f"       state: {state_path(queue_path)}")
             input("Press Enter to close Chrome... ")

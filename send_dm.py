@@ -33,6 +33,7 @@ Requires Python 3.8+ and Selenium 4.
 """
 from __future__ import annotations
 
+import json
 import random
 import re
 import time
@@ -66,11 +67,17 @@ FAILED = r"fail|unable|couldn.t|can.t|not sent|try again|limit"
 UNAVAILABLE = (r"unable to (message|chat|dm)|can.?t (message|chat|dm)|cannot (message|chat|dm)|"
                r"(not|n.t) accepting (messages|chats|dms)|does ?n.t accept (messages|chats|dms)")
 NO_SUCH_USER = r"invalid username|no matching users|(user|account) (does ?n.t|does not) exist|user not found|no such user"
-# Reddit refusing this account rather than one recipient (rate limit, suspension, logged out).
-ACCOUNT_LIMITED = (r"doing that (too much|a lot)|take a break|rate.?limit|too many (messages|requests|attempts)|"
-                   r"try again in \d|(account|you).{0,25}(suspended|banned|restricted|locked)|not logged in|"
-                   r"captcha|verify your (email|account)")
+# Reddit refusing this account rather than one recipient, by kind.
+LOGIN_NEEDED = r"not logged in|log in to (continue|send|message)|sign in to (continue|send|message)|session (has )?expired"
+RATE_LIMITED = (r"doing that (too much|a lot)|take a break|rate.?limit|too many (messages|requests|attempts)|"
+                r"try again in \d")
+RESTRICTED = r"(account|you).{0,25}(suspended|banned|restricted|locked)|captcha|verify your (email|account)"
+ACCOUNT_LIMITED = f"{LOGIN_NEEDED}|{RATE_LIMITED}|{RESTRICTED}"
+ACCOUNT_WIDE = ("login", "rate_limited", "restricted")     # Result statuses that stop every further send
 COMPOSE_URL = "https://www.reddit.com/message/compose/"
+SENT_URL = "https://old.reddit.com/message/sent/.json?limit=100&raw_json=1"
+ME_URL = "https://old.reddit.com/api/me.json"
+VERIFY_TIMEOUT = 45   # seconds to wait for a submitted message to show up in the sent folder
 DEFAULT_SUBJECT = "Hello"
 
 # Page-side helpers. Everything here walks the page *including* open shadow roots.
@@ -310,21 +317,42 @@ class NoSuchUser(RuntimeError):
 
 
 class AccountBlocked(RuntimeError):
-    """Reddit is refusing this account (rate limit, suspension, logged out); every other send would fail too."""
+    """Reddit is refusing this account; every other send would fail too.
+    kind: 'login' (logged out / wrong account), 'rate_limited' or 'restricted' (suspended, captcha, ...)."""
+
+    def __init__(self, message, kind=None):
+        super().__init__(message)
+        self.kind = kind or _account_kind(message)
+
+
+class SendNotClicked(RuntimeError):
+    """The Send click was blocked before the browser dispatched it, so nothing was submitted."""
+
+
+class NotInSent(RuntimeError):
+    """Send was clicked, but the message never showed up in this account's sent folder."""
+
+
+def _account_kind(text):
+    if re.search(LOGIN_NEEDED, text, re.I):
+        return "login"
+    if re.search(RATE_LIMITED, text, re.I):
+        return "rate_limited"
+    return "restricted"
 
 
 def classify(exc):
-    """Only what Reddit's own wording establishes: 'account' (names this account), 'recipient' (no such user),
-    'refused' (refused, cause not stated) or 'error' (anything else)."""
+    """Only what Reddit's own wording establishes: 'login' / 'rate_limited' / 'restricted' (this account),
+    'recipient' (no such user), 'refused' (refused, cause not stated) or 'error' (anything else)."""
     if isinstance(exc, AccountBlocked):
-        return "account"
+        return exc.kind
     if isinstance(exc, NoSuchUser):
         return "recipient"
     if isinstance(exc, MessageRefused):
         return "refused"
     text = str(exc)
     if re.search(ACCOUNT_LIMITED, text, re.I):
-        return "account"
+        return _account_kind(text)
     if re.search(NO_SUCH_USER, text, re.I):
         return "recipient"
     if re.search(UNAVAILABLE, text, re.I):
@@ -343,9 +371,17 @@ class StepFailed(RuntimeError):
 @dataclass
 class Result:
     """What happened to one send. Truthy only when the message was sent.
-    status: 'sent' | 'recipient' (Reddit says no such user) | 'invalid' (bad username/subject/body)
-            | 'refused' (Reddit refused without saying whether the recipient or this account is the cause)
-            | 'account' (this account is blocked or rate-limited: stop) | 'error' (anything else: retry later)
+    status:
+      'sent'           confirmed: the message is in this account's sent folder, to that recipient
+      'recipient'      Reddit says there is no such user
+      'refused'        Reddit refused without saying whether the recipient or this account is the cause
+      'login'          not logged in, or logged in as the wrong account            } account-wide:
+      'rate_limited'   Reddit says this account is sending too much                } stop sending
+      'restricted'     suspended, locked, captcha, ...                             }
+      'invalid'        bad entry (username, subject, body or link); nothing was opened or submitted
+      'not_submitted'  failed before Send was clicked; safe to retry
+      'uncertain'      Send was clicked but the message couldn't be confirmed; it may have gone out,
+                       so it must be checked before any retry
     reason starts with the flow that produced it ('compose: ' or 'chat: '); a refusal in one flow says
     nothing about the other."""
     status: str
@@ -373,7 +409,72 @@ def check_account(driver):
     """Raise AccountBlocked at once if the page says this account is rate-limited, suspended or logged out."""
     why = js(driver, "notice", ACCOUNT_LIMITED)
     if why:
-        raise AccountBlocked(f"Reddit is refusing this account: {why!r}")
+        raise AccountBlocked(f"Reddit is refusing this account: {why!r}", _account_kind(why))
+
+
+def reddit_json(driver, url):
+    """Open one of Reddit's .json URLs in the logged-in browser and parse it. RuntimeError if the page
+    isn't JSON (logged out, blocked, or an error page)."""
+    driver.get(url)
+    text = driver.execute_script("return document.body ? document.body.innerText : ''")
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise RuntimeError(f"{url} did not return JSON (logged out or blocked?): {text[:120]!r}") from None
+
+
+def active_sender(driver):
+    """Username of the account this browser profile is logged in as. AccountBlocked('login') if none."""
+    try:
+        name = (reddit_json(driver, ME_URL).get("data") or {}).get("name")
+    except RuntimeError as exc:
+        raise AccountBlocked(f"couldn't tell which account is logged in: {exc}", "login") from None
+    if not name:
+        raise AccountBlocked("not logged in: Reddit's /api/me has no username", "login")
+    return name
+
+
+def verify_sender(driver, expected):
+    """Stop (AccountBlocked 'login') unless the profile is logged in as `expected`. Returns the name."""
+    name = active_sender(driver)
+    if name.lower() != expected.strip().lower().removeprefix("u/"):
+        raise AccountBlocked(f"logged in as u/{name}, but config.json's sender_username is u/{expected}", "login")
+    return name
+
+
+def find_in_sent(driver, want, since, sender=None, pages=2):
+    """The sent-folder message matching want (recipient, subject, body; sent by `sender`, created at or after
+    `since` - 2 min of clock slack), or None. RuntimeError if the folder can't be read."""
+    url, after = SENT_URL, None
+    for _ in range(pages):
+        data = reddit_json(driver, url + (f"&after={after}" if after else ""))["data"]
+        for child in data["children"]:
+            msg = child["data"]
+            if (msg.get("created_utc", 0) >= since - 120
+                    and (msg.get("dest") or "").lower().removeprefix("u/") == want["to"].lower()
+                    and (not sender or (msg.get("author") or "").lower() == sender.lower())
+                    and _squash(msg.get("subject")) == _squash(want["subject"])
+                    and _squash(msg.get("body")) == _squash(want["message"])):
+                return msg
+        after = data.get("after")
+        if not after:
+            return None
+    return None
+
+
+def verify_in_sent(driver, want, since, sender=None, timeout=None):
+    """Wait until the message is in the sent folder; NotInSent if it isn't within `timeout` seconds
+    (default VERIFY_TIMEOUT)."""
+    timeout = VERIFY_TIMEOUT if timeout is None else timeout
+    deadline = time.monotonic() + timeout
+    while True:
+        msg = find_in_sent(driver, want, since, sender)
+        if msg:
+            return msg
+        if time.monotonic() > deadline:
+            raise NotInSent(f"no message to u/{want['to']} with this subject and body in the sent folder "
+                            f"after {timeout}s")
+        time.sleep(5)
 
 
 def js(driver, fn, *args):
@@ -823,11 +924,11 @@ COMPOSE_FIELDS = (("to", "input", "message-recipient-input"),
 
 
 def _clean(username, message):
+    """Validate; the message is returned unchanged (only a leading u/ is dropped from the username)."""
     username = re.sub(r"^/?u/", "", username.strip())
     if not re.fullmatch(r"[A-Za-z0-9_-]+", username):
         raise ValueError(f"not a valid Reddit username: {username!r}")
-    message = message.replace("\r\n", "\n").strip()
-    if not message:
+    if not message.strip():
         raise ValueError("message is empty")
     return username, message
 
@@ -860,7 +961,8 @@ def compose_form(driver):
 
 
 def fill_compose(driver, want):
-    """Check each prefilled field against the link and type over anything Reddit left blank or changed."""
+    """Check each prefilled field against the link. A field Reddit left empty is typed in; a field holding
+    anything else stops the send (nothing has been submitted). All three are re-read before returning."""
     form = wait_for(driver, lambda d: check_account(d) or compose_form(d),
                     "the compose form's To / Title / Message fields")
     check_recipient(driver, want["to"])
@@ -868,20 +970,31 @@ def fill_compose(driver, want):
         have = js(driver, "read", form[key])
         if _squash(have) == _squash(want[key]):
             continue
-        print(f"    {key} field shows {have!r}; typing it in")
+        if have.strip():
+            raise RuntimeError(f"the {key} field shows {have[:80]!r}, not what the link says; not submitting")
+        print(f"    {key} field is empty; typing it in")
         pause()
         type_text(driver, form[key], want[key])
+    for key, _, _ in COMPOSE_FIELDS:
+        if _squash(js(driver, "read", form[key])) != _squash(want[key]):
+            raise RuntimeError(f"the {key} field still doesn't match the link; not submitting")
     return form
 
 
-def submit_compose(driver, form, username):
+def submit_compose(driver, form, username, about_to_click):
+    """Click Send exactly once (no fallback click methods: a second click could send twice).
+    about_to_click() runs immediately before the click, after every pre-submit check has passed."""
     check_recipient(driver, username)                    # the To field may only now have been validated
     alerts = js(driver, "alerts")
     send = js(driver, "css", 'button[type="submit"]', SEND) or js(driver, "css", 'button, [role="button"]', SEND)
     if not send:
         raise RuntimeError("no Send button on the compose form")
     pause(0.3, 0.8)
-    click(driver, send[0])
+    about_to_click()
+    try:
+        click(driver, send[0], methods=("native",))
+    except (ElementClickInterceptedException, ElementNotInteractableException, MoveTargetOutOfBoundsException) as exc:
+        raise SendNotClicked(f"the Send click was blocked ({type(exc).__name__}); nothing was submitted") from exc
     return alerts
 
 
@@ -908,8 +1021,11 @@ def confirm_compose(driver, form, alerts_before, username):
     print(f"    {how}")
 
 
-def send_compose(driver, link):
-    """Open a /message/compose/ link (as found in a queue file), check the prefill, click Send."""
+def send_compose(driver, link, *, sender=None, before_submit=None):
+    """Open a /message/compose/ link exactly as given (as found in a queue file), check the prefilled
+    fields, click Send once, then confirm the message is in this account's sent folder.
+    sender: expected author for that check. before_submit(): called right before Send is clicked
+    (the ledger uses it to note that a submission is in flight)."""
     try:
         want = parse_compose_link(link)
         want["to"], want["message"] = _clean(want["to"], want["message"])
@@ -918,6 +1034,13 @@ def send_compose(driver, link):
     except ValueError as exc:
         print(f"[!] not sending: {exc}")
         return Result("invalid", f"compose: {exc}")
+    clicked = {"at": None}
+
+    def about_to_click():
+        if before_submit:
+            before_submit()
+        clicked["at"] = time.time()                      # set before the click: a click that errors may still land
+
     try:
         driver.switch_to.default_content()
         with step(driver, "step1_open_compose", f"opening the compose link for u/{want['to']}"):
@@ -925,24 +1048,36 @@ def send_compose(driver, link):
             wait_until_loaded(driver, compose_form)
         with step(driver, "step2_check_form", "checking the prefilled To / Title / Message"):
             form = fill_compose(driver, want)
-        with step(driver, "step3_send", 'clicking "Send"'):
-            alerts = submit_compose(driver, form, want["to"])
+        with step(driver, "step3_send", 'clicking "Send" (once)'):
+            alerts = submit_compose(driver, form, want["to"], about_to_click)
         with step(driver, "step4_confirm", "waiting for Reddit to accept the message"):
             confirm_compose(driver, form, alerts, want["to"])
+        with step(driver, "step5_verify", "looking for the message in this account's sent folder"):
+            verify_in_sent(driver, want, clicked["at"], sender)
     except StepFailed as exc:
-        return Result(exc.kind, f"compose: {exc}")
-    print(f"[done] message to {want['to']} sent")
-    return Result("sent")
+        if exc.kind != "error":                          # Reddit said what went wrong: not delivered
+            return Result(exc.kind, f"compose: {exc}")
+        if clicked["at"] is None or isinstance(exc.__cause__, SendNotClicked):
+            return Result("not_submitted", f"compose: {exc}")
+        try:                                             # it may have gone out anyway
+            if find_in_sent(driver, want, clicked["at"], sender):
+                print("    ...but it is in the sent folder")
+                return Result("sent", f"compose: confirmed in the sent folder after: {exc}")
+        except Exception as check_error:
+            exc = f"{exc}; sent folder unreadable: {check_error}"
+        return Result("uncertain", f"compose: Send was clicked; {exc}")
+    print(f"[done] message to {want['to']} is in the sent folder")
+    return Result("sent", "compose: confirmed in the sent folder")
 
 
 # ----------------------------------------------------------------- entry point
-def send_dm(driver, username, message, *, subject=DEFAULT_SUBJECT):
+def send_dm(driver, username, message, *, subject=DEFAULT_SUBJECT, sender=None, before_submit=None):
     try:
         link = compose_link(username, message, subject)
     except ValueError as exc:
         print(f"[!] not sending: {exc}")
         return Result("invalid", f"compose: {exc}")
-    return send_compose(driver, link)
+    return send_compose(driver, link, sender=sender, before_submit=before_submit)
 
 
 # ----------------------------------------------------------------- chat-UI entry point
@@ -954,6 +1089,7 @@ def send_chat_dm(driver, username, message, *, verify_recipient=True):
         print(f"[!] not sending: {exc}")
         return Result("invalid", f"chat: {exc}")
     needle = _needle(message)
+    pressed = False
 
     try:
         driver.switch_to.default_content()
@@ -967,12 +1103,14 @@ def send_chat_dm(driver, username, message, *, verify_recipient=True):
             pick_result(driver, username, field)
         with step(driver, "step5_message_box", "typing the message"):
             box, baseline = write_message(driver, username, message, needle, field, verify_recipient)
+        pressed = True                                   # from here on the message may have gone out
         with step(driver, "step6_send", "pressing ENTER"):
             alerts = press_enter(driver, box, needle, baseline)
         with step(driver, "step7_confirm", "waiting for the message to show up in the thread"):
             confirm_sent(driver, box, needle, baseline, alerts)
     except StepFailed as exc:
-        return Result(exc.kind, f"chat: {exc}")
+        kind = exc.kind if exc.kind != "error" else ("uncertain" if pressed else "not_submitted")
+        return Result(kind, f"chat: {exc}")
     finally:
         try:
             driver.switch_to.default_content()
