@@ -1,4 +1,5 @@
 import undetected_chromedriver as uc
+from chrome_version import chrome_major
 import time
 import random
 import os
@@ -12,7 +13,7 @@ def test_send_dm(account_id, target_username, message):
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
 
-    driver = uc.Chrome(options=options, version_main=154)
+    driver = uc.Chrome(options=options, version_main=chrome_major())
 
     try:
         print("[+] Opening chat...")

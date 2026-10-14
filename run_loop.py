@@ -1,7 +1,7 @@
 """run_loop.py - send DMs from target_users.csv on a loop, respecting config.json limits.
 
 Reads:
-    config.json        daily_limit_per_account, min/max delays, message_template
+    config.json        daily_limit_per_account, min/max delays, subject_template, message_template
     target_users.csv   one username per row (header row "username")
     contacted.csv      written here; tracks who has already been messaged
 
@@ -17,8 +17,9 @@ from datetime import date, datetime
 from pathlib import Path
 
 import undetected_chromedriver as uc
+from chrome_version import chrome_major
 
-from send_dm import send_dm
+from send_dm import COMPOSE_URL, DEFAULT_SUBJECT, send_dm
 
 HERE = Path(__file__).resolve().parent
 PROFILE = HERE / "accounts" / "account_1" / "chrome_profile"
@@ -67,11 +68,11 @@ def main():
     options.add_argument(f"--user-data-dir={PROFILE}")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
-    driver = uc.Chrome(options=options, version_main=154)
+    driver = uc.Chrome(options=options, version_main=chrome_major())
 
     try:
         driver.set_window_size(1400, 900)
-        driver.get("https://www.reddit.com/chat/")
+        driver.get(COMPOSE_URL)
         time.sleep(random.uniform(4, 7))
         if "login" in driver.current_url:
             raise SystemExit("Not logged in. Run test_connection.py and log in manually first.")
@@ -85,10 +86,11 @@ def main():
                 continue
 
             message = cfg["message_template"].format(username=username)
+            subject = cfg.get("subject_template", DEFAULT_SUBJECT).format(username=username)
             print(f"[+] Sending to {username} ({sent + 1}/{cap})")
             ok = False
             try:
-                ok = send_dm(driver, username, message)
+                ok = send_dm(driver, username, message, subject=subject)
             except Exception as exc:
                 print(f"[!] {username} raised {type(exc).__name__}: {exc}")
 

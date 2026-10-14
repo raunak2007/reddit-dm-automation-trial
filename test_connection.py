@@ -1,4 +1,5 @@
 import undetected_chromedriver as uc
+from chrome_version import chrome_major
 import time
 import random
 import os
@@ -17,7 +18,7 @@ def test_reddit_connection(account_id="account_1"):
     options.add_argument("--no-default-browser-check")
     options.add_argument("--window-size=1200,900")
 
-    driver = uc.Chrome(options=options, version_main=154)
+    driver = uc.Chrome(options=options, version_main=chrome_major())
 
     try:
         print("[+] Launching Reddit...")

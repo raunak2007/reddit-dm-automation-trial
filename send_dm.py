@@ -1,15 +1,21 @@
-"""send_dm.py - send one Reddit chat message through the web UI.
+"""send_dm.py - send one Reddit private message through the /message/compose/ form.
 
 Run it directly (opens the automation profile, sends one message, then waits for Enter):
 
-    python send_dm.py Efficient_Resolve_78 "Test message from the script"
+    python send_dm.py Efficient_Resolve_78 "Test message from the script" [--subject "Hello"]
 
-or call it from your own code with a driver that is already on https://www.reddit.com/chat/:
+or call it from your own code with any logged-in driver:
 
-    from send_dm import send_dm
-    ok = send_dm(driver, "Efficient_Resolve_78", "Test message from the script")
+    from send_dm import send_dm, send_compose
+    ok = send_dm(driver, "Efficient_Resolve_78", "Test message", subject="Hello")
+    ok = send_compose(driver, "https://www.reddit.com/message/compose/?to=...&subject=...&message=...")
 
-Returns True once the message is visible in the thread. On failure it prints the step that
+send_dm builds the same compose link a queue file contains and hands it to send_compose, which
+opens it, checks that Reddit prefilled the recipient, title and message, clicks Send and waits
+for Reddit to accept it. The older chat-UI flow (/chat/ + recipient search) is still available
+as send_chat_dm.
+
+Returns True once Reddit accepts the message. On failure it prints the step that
 failed, saves <step>_failed.png and <step>_failed_dom.txt, and returns False.
 Each step tries XPath, then a selector taken from the real markup, then generic fallbacks.
 Requires Python 3.8+ and Selenium 4.
@@ -19,6 +25,7 @@ from __future__ import annotations
 import random
 import re
 import time
+import urllib.parse
 from contextlib import contextmanager
 
 from selenium.common.exceptions import (
@@ -42,6 +49,8 @@ START = r"^(start |create )?(a )?new chat$"
 CONFIRM = r"^(start chat(ting)?|start|chat|create chat|next|done|continue|confirm)$"
 SEND = r"^send( a)?( message| chat)?$"
 FAILED = r"fail|unable|couldn.t|can.t|not sent|try again|limit"
+COMPOSE_URL = "https://www.reddit.com/message/compose/"
+DEFAULT_SUBJECT = "Hello"
 
 # Page-side helpers. Everything here walks the page *including* open shadow roots.
 _JS = r"""
@@ -394,7 +403,7 @@ def wait_until_loaded(driver):
         state = js(d, "state")
         return state["ready"] == "complete" and state["controls"] > 0
 
-    wait_for(driver, rendered, "the chat app to render")
+    wait_for(driver, rendered, "the page to render")
 
     quiet = {"nodes": -1, "polls": 0}
 
@@ -637,14 +646,128 @@ def confirm_sent(driver, box, needle, baseline, alerts_before):
     raise RuntimeError(f"message was drawn but the page reports: {errors[0]!r}")
 
 
-# ----------------------------------------------------------------- entry point
-def send_dm(driver, username, message, *, verify_recipient=True):
+# ----------------------------------------------------------------- compose form
+# Real markup (www.reddit.com/message/compose/): faceplate-text-input >> <input name="message-recipient-input">,
+# faceplate-text-input >> <input name="message-title">, faceplate-textarea-input >> <textarea name="message-content">,
+# and a light-DOM <button type="submit">Send</button>. The page prefills all three fields from ?to=&subject=&message=.
+COMPOSE_FIELDS = (("to", "input", "message-recipient-input"),
+                  ("subject", "input", "message-title"),
+                  ("message", "box", "message-content"))
+
+
+def _clean(username, message):
     username = re.sub(r"^/?u/", "", username.strip())
     if not re.fullmatch(r"[A-Za-z0-9_-]+", username):
         raise ValueError(f"not a valid Reddit username: {username!r}")
     message = message.replace("\r\n", "\n").strip()
     if not message:
         raise ValueError("message is empty")
+    return username, message
+
+
+def compose_link(username, message, subject=DEFAULT_SUBJECT):
+    """The same link format the queue files use."""
+    username, message = _clean(username, message)
+    return COMPOSE_URL + "?" + urllib.parse.urlencode({"to": username, "subject": subject, "message": message},
+                                                      quote_via=urllib.parse.quote)
+
+
+def parse_compose_link(link):
+    """{'to', 'subject', 'message'} from a /message/compose/ link."""
+    parts = urllib.parse.urlparse(link)
+    if not re.search(r"(^|\.)reddit\.com$", parts.netloc) or not parts.path.rstrip("/").endswith("/message/compose"):
+        raise ValueError(f"not a reddit.com/message/compose/ link: {link!r}")
+    query = urllib.parse.parse_qs(parts.query)
+    return {key: query.get(key, [""])[0] for key, _, _ in COMPOSE_FIELDS}
+
+
+def compose_form(driver):
+    """{'to': el, 'subject': el, 'message': el} once all three fields are on the page, else None."""
+    form = {}
+    for key, kind, name in COMPOSE_FIELDS:
+        found = js(driver, "fields", kind, f"^{name}$|^{name} ")
+        if not found:
+            return None
+        form[key] = found[0]
+    return form
+
+
+def fill_compose(driver, want):
+    """Check each prefilled field against the link and type over anything Reddit left blank or changed."""
+    form = wait_for(driver, compose_form, "the compose form's To / Title / Message fields")
+    for key, _, _ in COMPOSE_FIELDS:
+        have = js(driver, "read", form[key])
+        if _squash(have) == _squash(want[key]):
+            continue
+        print(f"    {key} field shows {have!r}; typing it in")
+        pause()
+        type_text(driver, form[key], want[key])
+    return form
+
+
+def submit_compose(driver, form):
+    alerts = js(driver, "alerts")
+    send = js(driver, "css", 'button[type="submit"]', SEND) or js(driver, "css", 'button, [role="button"]', SEND)
+    if not send:
+        raise RuntimeError("no Send button on the compose form")
+    pause(0.3, 0.8)
+    click(driver, send[0])
+    return alerts
+
+
+def confirm_compose(driver, form, alerts_before):
+    """Sent = Reddit navigated away from the form, cleared it, or showed a non-error notice.
+    A notice matching FAILED (rate limit, unknown user, ...) fails the step."""
+    def outcome(d):
+        said = [a for a in js(d, "alerts") if a not in alerts_before]
+        errors = [a for a in said if re.search(FAILED, a)]
+        if errors:
+            raise RuntimeError(f"Reddit refused the message: {errors[0]!r}")
+        if "/message/compose" not in d.current_url:
+            return f"left the compose page for {d.current_url}"
+        box = _live(form["message"])
+        if box is None or not js(d, "read", box).strip():
+            return "the compose form was cleared"
+        if said:
+            return f"the page says {said[0]!r}"
+        return False
+
+    how = wait_for(driver, outcome, "Reddit to accept the message")
+    print(f"    {how}")
+
+
+def send_compose(driver, link):
+    """Open a /message/compose/ link (as found in a queue file), check the prefill, click Send."""
+    want = parse_compose_link(link)
+    want["to"], want["message"] = _clean(want["to"], want["message"])
+    if not want["subject"].strip():
+        raise ValueError("compose link has no subject; Reddit requires a title")
+    try:
+        driver.switch_to.default_content()
+        with step(driver, "step1_open_compose", f"opening the compose link for u/{want['to']}"):
+            driver.get(link)
+            wait_until_loaded(driver)
+        with step(driver, "step2_check_form", "checking the prefilled To / Title / Message"):
+            form = fill_compose(driver, want)
+        with step(driver, "step3_send", 'clicking "Send"'):
+            alerts = submit_compose(driver, form)
+        with step(driver, "step4_confirm", "waiting for Reddit to accept the message"):
+            confirm_compose(driver, form, alerts)
+    except StepFailed:
+        return False
+    print(f"[done] message to {want['to']} sent")
+    return True
+
+
+# ----------------------------------------------------------------- entry point
+def send_dm(driver, username, message, *, subject=DEFAULT_SUBJECT):
+    return send_compose(driver, compose_link(username, message, subject))
+
+
+# ----------------------------------------------------------------- chat-UI entry point
+def send_chat_dm(driver, username, message, *, verify_recipient=True):
+    """Old flow: driver must already be on https://www.reddit.com/chat/."""
+    username, message = _clean(username, message)
     needle = _needle(message)
 
     try:
@@ -676,25 +799,28 @@ def send_dm(driver, username, message, *, verify_recipient=True):
 
 # ----------------------------------------------------------------- run directly
 if __name__ == "__main__":
+    import argparse
     import sys
     from pathlib import Path
 
     import undetected_chromedriver as uc
+    from chrome_version import chrome_major
 
-    args = [a for a in sys.argv[1:] if a != "--no-verify"]
-    if len(args) != 2:
-        sys.exit('usage: python send_dm.py <username> "<message>" [--no-verify]')
+    ap = argparse.ArgumentParser(description="Send one Reddit private message via /message/compose/.")
+    ap.add_argument("username")
+    ap.add_argument("message")
+    ap.add_argument("--subject", default=DEFAULT_SUBJECT)
+    args = ap.parse_args()
     profile = Path(__file__).resolve().parent / "accounts" / "account_1" / "chrome_profile"
     if not profile.is_dir():
         sys.exit(f"Profile folder not found: {profile}")
 
     chrome_options = uc.ChromeOptions()
     chrome_options.add_argument(f"--user-data-dir={profile}")
-    chrome = uc.Chrome(options=chrome_options, version_main=154)
+    chrome = uc.Chrome(options=chrome_options, version_main=chrome_major())
     try:
         chrome.set_window_size(1400, 900)
-        chrome.get("https://www.reddit.com/chat/")
-        sent = send_dm(chrome, args[0], args[1], verify_recipient="--no-verify" not in sys.argv)
+        sent = send_dm(chrome, args.username, args.message, subject=args.subject)
         print("RESULT:", "sent" if sent else "not sent - see the failed step above and the saved files")
         input("Press Enter here to close Chrome... ")
     except KeyboardInterrupt:

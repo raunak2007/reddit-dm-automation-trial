@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import undetected_chromedriver as uc
+from chrome_version import chrome_major
 from selenium.common.exceptions import WebDriverException
 
 from send_dm import js, wait_until_loaded
@@ -28,7 +29,7 @@ def main():
     options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={PROFILE}")
     try:
-        driver = uc.Chrome(options=options, version_main=154)
+        driver = uc.Chrome(options=options, version_main=chrome_major())
     except Exception as exc:
         sys.exit(f"Chrome did not start: {exc}\n"
                  "If another Chrome window already has this profile open, close that window yourself and rerun.")

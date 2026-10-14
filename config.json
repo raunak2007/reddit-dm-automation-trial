@@ -2,5 +2,6 @@
   "daily_limit_per_account": 10,
   "min_delay_seconds": 30,
   "max_delay_seconds": 120,
+  "subject_template": "Hello",
   "message_template": "Hi {username}, I saw your post and wanted to reach out."
 }
