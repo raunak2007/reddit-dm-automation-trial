@@ -4,11 +4,17 @@ By default this does NOT submit anything. It reads a queue HTML file (the format
 <li class=c> per entry, a reddit.com/message/compose/ link, and a
 <input type=checkbox data-u=...> Sent marker), opens the next unsent entry's
 compose link in a persistent Chrome profile, and waits for you to press Enter
-after you have clicked Send yourself in the browser. It then records the entry
-in a local state file so the next run resumes where you left off.
+after you have clicked Send yourself in the browser. Entries you mark sent are
+recorded in contacted.csv (ledger.py, shared with run_loop.py), and your place
+in the queue is kept in queue_state/<queue>.json.
 
-With --send it submits each entry's compose link itself (send_dm.send_compose), honoring
-daily_limit_per_account and min/max_delay_seconds from config.json.
+With --send it submits each entry's compose link itself, via the same loop as
+run_loop.py: config.json's daily cap and delays, skipping anyone already sent or
+undeliverable, and stopping (exit code 2) if Reddit refuses the account.
+
+Before either mode opens anything, everyone in the account's Reddit sent messages is recorded as
+sent (no sending if that check fails), and the queue page's own Sent checkmarks must have been
+imported once with `python ledger.py import-checkmarks` (or pass --no-checkmarks).
 
 Usage:
     python open_queue.py <queue.html> [--profile account_1] [--reset]
@@ -17,16 +23,16 @@ Usage:
 
 Options:
     --profile NAME   Chrome profile under accounts/ to use (default: account_1)
-    --reset          Forget local state for this queue and start from entry 1
+    --reset          Start from entry 1 again (who was sent stays in contacted.csv)
     --list           Print the parsed queue and exit (no browser)
     --send           Click Send automatically instead of waiting for you
+    --no-checkmarks  Go ahead without importing the queue page's Sent checkmarks
 """
 from __future__ import annotations
 
 import argparse
 import html as html_mod
 import json
-import random
 import re
 import sys
 import time
@@ -35,7 +41,9 @@ from pathlib import Path
 
 import undetected_chromedriver as uc
 from chrome_version import chrome_major
-from send_dm import send_compose
+
+import ledger
+from send_dm import Result, compose_link
 
 HERE = Path(__file__).resolve().parent
 STATE_DIR = HERE / "queue_state"
@@ -44,6 +52,7 @@ CONFIG = HERE / "config.json"
 CARD_RE = re.compile(r"<li class=c>(.*?)</li>", re.S)
 LINK_RE = re.compile(r'href="(https://www\.reddit\.com/message/compose/\?[^"]+)"')
 DATA_U_RE = re.compile(r'data-u="([^"]+)"')
+PRE_RE = re.compile(r"<pre[^>]*>(.*?)</pre>", re.S)
 
 
 def parse_queue(path: Path):
@@ -57,11 +66,22 @@ def parse_queue(path: Path):
             continue
         link = html_mod.unescape(link_m.group(1))
         q = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
+        to = user_m.group(1) if user_m else q.get("to", [""])[0]
+        subject = q.get("subject", [""])[0]
+        message = q.get("message", [""])[0]
+        pre_m = PRE_RE.search(card)
+        if pre_m:
+            body = html_mod.unescape(pre_m.group(1)).strip()
+            if " ".join(body.split()) != " ".join(message.split()):
+                print(f"[!] entry {i}: compose link body differs from the <pre> body; "
+                      f"using the <pre> body", file=sys.stderr)
+                message = body
+                link = compose_link(to, message, subject)
         entries.append({
             "index": i,
-            "to": (user_m.group(1) if user_m else q.get("to", [""])[0]),
-            "subject": q.get("subject", [""])[0],
-            "message": q.get("message", [""])[0],
+            "to": to,
+            "subject": subject,
+            "message": message,
             "link": link,
         })
     return entries
@@ -75,8 +95,8 @@ def state_path(queue_path: Path) -> Path:
 def load_state(queue_path: Path) -> dict:
     p = state_path(queue_path)
     if not p.exists():
-        return {"sent": {}, "cursor": 0}
-    return json.loads(p.read_text())
+        return {"cursor": 0}
+    return {"cursor": json.loads(p.read_text()).get("cursor", 0)}
 
 
 def save_state(queue_path: Path, state: dict) -> None:
@@ -101,55 +121,13 @@ def make_driver(profile_name: str):
     return driver
 
 
-def mark_sent(queue_path: Path, state: dict, entry: dict) -> None:
-    state["sent"][entry["to"]] = {
-        "index": entry["index"],
-        "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    state["cursor"] += 1
-    save_state(queue_path, state)
-
-
-def send_all(driver, queue_path: Path, entries: list, state: dict) -> None:
-    """--send: submit each unsent entry's compose link, within config.json's cap and delays.
-    Starts from the top every run, so entries that failed last time are retried."""
+def send_all(driver, entries: list) -> int:
+    """--send: ledger.send_loop over the queue's compose links. Returns the exit code."""
     cfg = json.loads(CONFIG.read_text())
-    cap = cfg["daily_limit_per_account"]
-    today = time.strftime("%Y-%m-%d")
-    sent_today = sum(1 for v in state["sent"].values() if v["sent_at"].startswith(today))
-    failed = 0
-    state["cursor"] = 0
-    while state["cursor"] < len(entries):
-        entry = entries[state["cursor"]]
-        if entry["to"] in state["sent"]:
-            state["cursor"] += 1
-            continue
-        if sent_today >= cap:
-            print(f"[+] Hit daily cap ({cap}). Stopping; the next run resumes here.")
-            break
-        print(f"\n[{state['cursor'] + 1}/{len(entries)}] u/{entry['to']} ({sent_today + 1}/{cap} today)")
-        try:
-            ok = send_compose(driver, entry["link"])
-        except ValueError as exc:
-            print(f"    [!] bad entry: {exc}")
-            ok = False
-        if ok:
-            mark_sent(queue_path, state, entry)
-            sent_today += 1
-        else:
-            failed += 1
-            print("    [!] not sent; leaving it unsent and moving on")
-            state["cursor"] += 1
-            save_state(queue_path, state)
-        if state["cursor"] < len(entries) and sent_today < cap:
-            delay = random.uniform(cfg["min_delay_seconds"], cfg["max_delay_seconds"])
-            print(f"[+] Waiting {delay:.0f}s before the next one...")
-            time.sleep(delay)
-    if failed:
-        print(f"[!] {failed} entries failed; the next --send run retries them.")
+    return ledger.report(ledger.send_loop(driver, [(e["to"], e["link"]) for e in entries], cfg))
 
 
-def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send: bool):
+def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send: bool, no_checkmarks: bool):
     entries = parse_queue(queue_path)
     if not entries:
         sys.exit("No entries found in that queue file.")
@@ -157,21 +135,33 @@ def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send:
 
     if list_only:
         for e in entries:
+            why = ledger.skip_reason(e["to"])
             print(f"  {e['index']:>3}. u/{e['to']:<32} subject={e['subject']!r} "
-                  f"body={len(e['message'])} chars")
+                  f"body={len(e['message'])} chars" + (f"  [skip: {why}]" if why else ""))
+        if not ledger.checkmarks_imported(queue_path):
+            print("\n[!] " + ledger.checkmark_help(queue_path))
         return
 
-    state = {"sent": {}, "cursor": 0} if reset else load_state(queue_path)
+    if not no_checkmarks and not ledger.checkmarks_imported(queue_path):
+        sys.exit(ledger.checkmark_help(queue_path))
+    state = {"cursor": 0} if reset else load_state(queue_path)
     driver = make_driver(profile)
+    code = 0
 
     try:
+        try:
+            ledger.sync_reddit_sent(driver)
+        except RuntimeError as exc:
+            sys.exit(f"Not opening anything: {exc}")
         if auto_send:
-            send_all(driver, queue_path, entries, state)
+            code = send_all(driver, entries)
         while not auto_send and state["cursor"] < len(entries):
             entry = entries[state["cursor"]]
             username = entry["to"]
 
-            if username in state["sent"]:
+            why = ledger.skip_reason(username)
+            if why:
+                print(f"[=] skipping u/{username}: {why}")
                 state["cursor"] += 1
                 continue
 
@@ -203,16 +193,21 @@ def run(queue_path: Path, profile: str, reset: bool, list_only: bool, auto_send:
                 continue
 
             # default: treat anything else as "sent"
-            mark_sent(queue_path, state, entry)
+            ledger.record(username, Result("sent", "marked sent by hand"))
+            state["cursor"] += 1
+            save_state(queue_path, state)
 
-        remaining = len(entries) - len(state["sent"])
-        print(f"\n[done] {len(state['sent'])} marked sent, {remaining} remaining.")
-        print(f"       state: {state_path(queue_path)}")
-        input("Press Enter to close Chrome... ")
+        if not auto_send:
+            done = sum(1 for e in entries if ledger.skip_reason(e["to"]))
+            print(f"\n[done] {done} of {len(entries)} entries sent or not sendable; "
+                  f"{ledger.sent_today()} sent today in total.")
+            print(f"       state: {state_path(queue_path)}")
+            input("Press Enter to close Chrome... ")
     except KeyboardInterrupt:
         print("\n[+] Interrupted. Progress saved.")
     finally:
         driver.quit()
+    return code
 
 
 def main():
@@ -223,10 +218,12 @@ def main():
     ap.add_argument("--reset", action="store_true")
     ap.add_argument("--list", action="store_true", dest="list_only")
     ap.add_argument("--send", action="store_true", dest="auto_send")
+    ap.add_argument("--no-checkmarks", action="store_true")
     args = ap.parse_args()
     if not args.queue.is_file():
         sys.exit(f"Queue file not found: {args.queue}")
-    run(args.queue.resolve(), args.profile, args.reset, args.list_only, args.auto_send)
+    sys.exit(run(args.queue.resolve(), args.profile, args.reset, args.list_only, args.auto_send,
+                 args.no_checkmarks))
 
 
 if __name__ == "__main__":

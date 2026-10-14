@@ -27,6 +27,7 @@ import re
 import time
 import urllib.parse
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -49,6 +50,14 @@ START = r"^(start |create )?(a )?new chat$"
 CONFIRM = r"^(start chat(ting)?|start|chat|create chat|next|done|continue|confirm)$"
 SEND = r"^send( a)?( message| chat)?$"
 FAILED = r"fail|unable|couldn.t|can.t|not sent|try again|limit"
+# What Reddit shows for a recipient this account can't message ("Unable to message this account").
+UNAVAILABLE = (r"unable to (message|chat|dm)|can.?t (message|chat|dm)|cannot (message|chat|dm)|"
+               r"(not|n.t) accepting (messages|chats|dms)|does ?n.t accept (messages|chats|dms)")
+NO_SUCH_USER = r"invalid username|no matching users|(user|account) (does ?n.t|does not) exist|user not found|no such user"
+# Reddit refusing this account rather than one recipient (rate limit, suspension, logged out).
+ACCOUNT_LIMITED = (r"doing that (too much|a lot)|take a break|rate.?limit|too many (messages|requests|attempts)|"
+                   r"try again in \d|(account|you).{0,25}(suspended|banned|restricted|locked)|not logged in|"
+                   r"captcha|verify your (email|account)")
 COMPOSE_URL = "https://www.reddit.com/message/compose/"
 DEFAULT_SUBJECT = "Hello"
 
@@ -219,6 +228,31 @@ const SDM = (() => {
       });
     },
 
+    // Why the result row `row` can't be picked: Reddit's "unable to message" text or a disabled flag on
+    // the row or its ancestors, up to the row's own <li> / option (not the whole dropdown). '' = pickable.
+    blocked: (row, pattern) => {
+      const re = new RegExp(pattern, 'i');
+      let disabled = false;
+      for (let n = row, i = 0; n && i <= 6; n = up(n), i++) {
+        if (n.disabled || n.getAttribute('aria-disabled') === 'true') disabled = true;
+        for (const s of [norm(n.innerText || n.textContent), norm(n.getAttribute('aria-label'))]) {
+          const m = s.match(re);
+          if (m) return s.slice(m.index, m.index + 120);
+        }
+        if (n.matches('li, [role="option"]')) break;
+      }
+      return disabled ? 'the result row is disabled' : '';
+    },
+
+    // Visible text matching `pattern` anywhere except the inbox list (whose previews could say anything),
+    // text fields (which hold our own message) and result rows (other users' rows; see blocked()).
+    notice: pattern => {
+      const re = new RegExp(pattern, 'i');
+      const hit = byText(s => re.test(s) && s.length < 200)
+        .find(el => !hostChain(el).some(h => h.localName === 'rs-rooms-nav') && !closest(el, BOX + ', input, li, ' + OPTION, 10));
+      return hit ? norm(hit.textContent) : '';
+    },
+
     alerts: () => uniq(all()
       .filter(el => el.matches('[role="alert"], [role="status"], [aria-live="assertive"], [class*="toast" i], [class*="error" i]') && visible(el))
       .map(el => norm(el.textContent)).filter(t => t && t.length < 200)),
@@ -254,8 +288,62 @@ return SDM[arguments[0]].apply(null, [].slice.call(arguments, 1));
 
 
 # ----------------------------------------------------------------- plumbing
+class RecipientUnavailable(RuntimeError):
+    """Reddit says this account can't message the recipient; waiting longer won't change that."""
+
+
+class AccountBlocked(RuntimeError):
+    """Reddit is refusing this account (rate limit, suspension, logged out); every other send would fail too."""
+
+
+def classify(exc):
+    """What a failure says about who is at fault: 'account', 'recipient' or 'error' (anything else)."""
+    if isinstance(exc, AccountBlocked):
+        return "account"
+    if isinstance(exc, RecipientUnavailable):
+        return "recipient"
+    text = str(exc)
+    if re.search(ACCOUNT_LIMITED, text, re.I):
+        return "account"
+    if re.search(f"{UNAVAILABLE}|{NO_SUCH_USER}", text, re.I):
+        return "recipient"
+    return "error"
+
+
 class StepFailed(RuntimeError):
-    """A step failed; the message names the step and the reason."""
+    """A step failed; the message names the step and the reason, kind is classify() of the cause."""
+
+    def __init__(self, message, kind="error"):
+        super().__init__(message)
+        self.kind = kind
+
+
+@dataclass
+class Result:
+    """What happened to one send. Truthy only when the message was sent.
+    status: 'sent' | 'recipient' (Reddit won't deliver to this user) | 'invalid' (bad username/subject/body)
+            | 'account' (this account is blocked or rate-limited: stop) | 'error' (anything else: retry later)"""
+    status: str
+    reason: str = ""
+
+    def __bool__(self):
+        return self.status == "sent"
+
+
+def check_recipient(driver, username, row=None, page=True):
+    """Raise RecipientUnavailable at once if u/username's result row or the page says they can't be messaged."""
+    row = row is not None and _live(row)
+    why = ((row and js(driver, "blocked", row, UNAVAILABLE))
+           or (page and js(driver, "notice", f"{UNAVAILABLE}|{NO_SUCH_USER}")))
+    if why:
+        raise RecipientUnavailable(f"Reddit won't let this account message u/{username}: {why!r}")
+
+
+def check_account(driver):
+    """Raise AccountBlocked at once if the page says this account is rate-limited, suspended or logged out."""
+    why = js(driver, "notice", ACCOUNT_LIMITED)
+    if why:
+        raise AccountBlocked(f"Reddit is refusing this account: {why!r}")
 
 
 def js(driver, fn, *args):
@@ -390,24 +478,30 @@ def step(driver, label, doing):
             print(f"    saved {label}_failed_dom.txt")
         except Exception as save_error:
             print(f"    could not save DOM listing: {save_error}")
-        raise StepFailed(f"{label}: {reason}") from exc
+        raise StepFailed(f"{label}: {reason}", classify(exc)) from exc
     print(f"[{label}] ok")
 
 
 # ----------------------------------------------------------------- step 1
-def wait_until_loaded(driver):
+def wait_until_loaded(driver, ready=None):
+    """Wait for the page to render, then to stop changing. ready(driver) -> truthy once the controls
+    the next step needs are on the page; as soon as it is, the page counts as loaded."""
     def rendered(d):
         url = d.current_url
         if re.search(r"reddit\.com/(login|register)", url):
-            raise RuntimeError(f"not logged in: redirected to {url}")
+            raise AccountBlocked(f"not logged in: redirected to {url}")
         state = js(d, "state")
         return state["ready"] == "complete" and state["controls"] > 0
 
     wait_for(driver, rendered, "the page to render")
+    if ready and ready(driver):
+        return
 
     quiet = {"nodes": -1, "polls": 0}
 
     def settled(d):
+        if ready and ready(d):
+            return True
         nodes = js(d, "state")["nodes"]
         quiet["polls"] = quiet["polls"] + 1 if nodes == quiet["nodes"] else 0
         quiet["nodes"] = nodes
@@ -453,16 +547,42 @@ def locate_in_any_frame(driver, finders):
     return None
 
 
+# The new-chat form counts as open when its username input is on the page. Only specific finders here:
+# recipient_finders' generic fallbacks ("any visible text input") would also match the site search box.
+def new_chat_finders(d):
+    return [
+        ("exact: #user-search-input", lambda: js(d, "css", "input#user-search-input", None)),
+        ("text input in the new-chat form", lambda: js(d, "css", 'input:not([type]), input[type="text"], '
+                                                                 'input[type="search"]', None, "rs-room-creation")),
+        ("xpath attribute", lambda: recipient_finders(d)[0][1]()),
+    ]
+
+
+def new_chat_open(driver):
+    return locate_in_any_frame(driver, new_chat_finders)
+
+
+def chat_page_ready(driver):
+    """The chat app has drawn what step 2 needs: the new-chat form, or a button that opens it."""
+    return new_chat_open(driver) or locate_in_any_frame(driver, start_chat_finders)
+
+
 def click_start_chat(driver):
+    js(driver, "snapshot")                               # lets step 3 tell which inputs are new
+    already = new_chat_open(driver)
+    if already:
+        print(f"    the new-chat form is already open (found its username input via {already[1]})")
+        return
     _, via = wait_for(driver, lambda d: locate_in_any_frame(d, start_chat_finders), 'the "Start new chat" button')
     print(f"    found via {via}")
-    js(driver, "snapshot")                               # lets step 3 tell which inputs are new
     url = js(driver, "url")
     fields = len(js(driver, "fields", "any", None, None, False))
     methods = ("native", "actions", "js")
     state = {"clicks": 0, "at": float("-inf"), "el": None}
 
     def opened(d):
+        if first_match(new_chat_finders(d)):              # same document the button was found in
+            return True
         if state["clicks"]:
             live = _live(state["el"])
             gone = live is None or not js(d, "visible", live)
@@ -479,7 +599,7 @@ def click_start_chat(driver):
                 state["at"] = time.monotonic()
         return False
 
-    wait_for(driver, opened, "the new-chat panel to open after the click")
+    wait_for(driver, opened, "the new-chat panel's username input to appear after the click")
 
 
 # ----------------------------------------------------------------- step 3
@@ -521,26 +641,37 @@ def result_finders(d, username, field):
 
 
 def pick_result(driver, username, field):
-    seen = {"key": None}
+    seen = {"key": None, "row": None, "no_user": None}
 
     def pick(d):
         anchor = _live(field) or (first_match(recipient_finders(d)) or (None,))[0]
         hit = anchor and first_match(result_finders(d, username, anchor))
         if not hit:
             seen["key"] = None
+            missing = js(d, "notice", NO_SUCH_USER)      # shown while searching too, so it must stay up 2s
+            if not missing:
+                seen["no_user"] = None
+            elif seen["no_user"] is None:
+                seen["no_user"] = time.monotonic()
+            elif time.monotonic() - seen["no_user"] > 2:
+                raise RecipientUnavailable(f"Reddit found no user u/{username}: {missing!r}")
             return False
         row, via = hit
+        check_recipient(d, username, row, page=False)    # a disabled row is not a match to click
         key = (row.id, row.rect["x"], row.rect["y"])
         if key != seen["key"]:                           # click only once the list has stopped shifting
             seen["key"] = key
             return False
         pause(0.2, 0.5)
         click(d, row)
+        seen["row"] = row
         return via
 
     via = wait_for(driver, pick, f"an exact match for '{username}' in the results dropdown "
                                  "(does the user exist and accept chats?)")
     print(f"    clicked via {via}")
+    pause(0.3, 0.6)
+    check_recipient(driver, username, seen["row"])      # some notices only appear after the click
 
 
 # ----------------------------------------------------------------- step 5
@@ -573,6 +704,8 @@ def write_message(driver, username, message, needle, field, verify_recipient):
     nudge = {"at": float("-inf")}
 
     def composer(d):
+        check_account(d)
+        check_recipient(d, username)
         hit = first_match(composer_finders(d, _live(field)))
         if hit:
             return hit
@@ -630,8 +763,12 @@ def confirm_sent(driver, box, needle, baseline, alerts_before):
     def new_alerts(d):
         return [a for a in js(d, "alerts") if a not in alerts_before]
 
+    def in_thread_or_refused(d):
+        check_account(d)
+        return in_thread(d)
+
     try:
-        wait_for(driver, in_thread, "the message to appear in the thread")
+        wait_for(driver, in_thread_or_refused, "the message to appear in the thread")
     except TimeoutException:
         said = new_alerts(driver)
         if said:
@@ -694,7 +831,9 @@ def compose_form(driver):
 
 def fill_compose(driver, want):
     """Check each prefilled field against the link and type over anything Reddit left blank or changed."""
-    form = wait_for(driver, compose_form, "the compose form's To / Title / Message fields")
+    form = wait_for(driver, lambda d: check_account(d) or compose_form(d),
+                    "the compose form's To / Title / Message fields")
+    check_recipient(driver, want["to"])
     for key, _, _ in COMPOSE_FIELDS:
         have = js(driver, "read", form[key])
         if _squash(have) == _squash(want[key]):
@@ -705,7 +844,8 @@ def fill_compose(driver, want):
     return form
 
 
-def submit_compose(driver, form):
+def submit_compose(driver, form, username):
+    check_recipient(driver, username)                    # the To field may only now have been validated
     alerts = js(driver, "alerts")
     send = js(driver, "css", 'button[type="submit"]', SEND) or js(driver, "css", 'button, [role="button"]', SEND)
     if not send:
@@ -715,10 +855,12 @@ def submit_compose(driver, form):
     return alerts
 
 
-def confirm_compose(driver, form, alerts_before):
+def confirm_compose(driver, form, alerts_before, username):
     """Sent = Reddit navigated away from the form, cleared it, or showed a non-error notice.
     A notice matching FAILED (rate limit, unknown user, ...) fails the step."""
     def outcome(d):
+        check_account(d)
+        check_recipient(d, username)
         said = [a for a in js(d, "alerts") if a not in alerts_before]
         errors = [a for a in said if re.search(FAILED, a)]
         if errors:
@@ -738,42 +880,55 @@ def confirm_compose(driver, form, alerts_before):
 
 def send_compose(driver, link):
     """Open a /message/compose/ link (as found in a queue file), check the prefill, click Send."""
-    want = parse_compose_link(link)
-    want["to"], want["message"] = _clean(want["to"], want["message"])
-    if not want["subject"].strip():
-        raise ValueError("compose link has no subject; Reddit requires a title")
+    try:
+        want = parse_compose_link(link)
+        want["to"], want["message"] = _clean(want["to"], want["message"])
+        if not want["subject"].strip():
+            raise ValueError("compose link has no subject; Reddit requires a title")
+    except ValueError as exc:
+        print(f"[!] not sending: {exc}")
+        return Result("invalid", str(exc))
     try:
         driver.switch_to.default_content()
         with step(driver, "step1_open_compose", f"opening the compose link for u/{want['to']}"):
             driver.get(link)
-            wait_until_loaded(driver)
+            wait_until_loaded(driver, compose_form)
         with step(driver, "step2_check_form", "checking the prefilled To / Title / Message"):
             form = fill_compose(driver, want)
         with step(driver, "step3_send", 'clicking "Send"'):
-            alerts = submit_compose(driver, form)
+            alerts = submit_compose(driver, form, want["to"])
         with step(driver, "step4_confirm", "waiting for Reddit to accept the message"):
-            confirm_compose(driver, form, alerts)
-    except StepFailed:
-        return False
+            confirm_compose(driver, form, alerts, want["to"])
+    except StepFailed as exc:
+        return Result(exc.kind, str(exc))
     print(f"[done] message to {want['to']} sent")
-    return True
+    return Result("sent")
 
 
 # ----------------------------------------------------------------- entry point
 def send_dm(driver, username, message, *, subject=DEFAULT_SUBJECT):
-    return send_compose(driver, compose_link(username, message, subject))
+    try:
+        link = compose_link(username, message, subject)
+    except ValueError as exc:
+        print(f"[!] not sending: {exc}")
+        return Result("invalid", str(exc))
+    return send_compose(driver, link)
 
 
 # ----------------------------------------------------------------- chat-UI entry point
 def send_chat_dm(driver, username, message, *, verify_recipient=True):
     """Old flow: driver must already be on https://www.reddit.com/chat/."""
-    username, message = _clean(username, message)
+    try:
+        username, message = _clean(username, message)
+    except ValueError as exc:
+        print(f"[!] not sending: {exc}")
+        return Result("invalid", str(exc))
     needle = _needle(message)
 
     try:
         driver.switch_to.default_content()
         with step(driver, "step1_page_load", "waiting for the chat app to finish loading"):
-            wait_until_loaded(driver)
+            wait_until_loaded(driver, chat_page_ready)
         with step(driver, "step2_start_chat", 'clicking "Start new chat"'):
             click_start_chat(driver)
         with step(driver, "step3_recipient_input", f"typing the recipient: {username}"):
@@ -786,15 +941,15 @@ def send_chat_dm(driver, username, message, *, verify_recipient=True):
             alerts = press_enter(driver, box, needle, baseline)
         with step(driver, "step7_confirm", "waiting for the message to show up in the thread"):
             confirm_sent(driver, box, needle, baseline, alerts)
-    except StepFailed:
-        return False
+    except StepFailed as exc:
+        return Result(exc.kind, str(exc))
     finally:
         try:
             driver.switch_to.default_content()
         except WebDriverException:
             pass
     print(f"[done] message to {username} is in the thread")
-    return True
+    return Result("sent")
 
 
 # ----------------------------------------------------------------- run directly
@@ -820,8 +975,8 @@ if __name__ == "__main__":
     chrome = uc.Chrome(options=chrome_options, version_main=chrome_major())
     try:
         chrome.set_window_size(1400, 900)
-        sent = send_dm(chrome, args.username, args.message, subject=args.subject)
-        print("RESULT:", "sent" if sent else "not sent - see the failed step above and the saved files")
+        result = send_dm(chrome, args.username, args.message, subject=args.subject)
+        print("RESULT:", "sent" if result else f"not sent ({result.status}) - {result.reason}")
         input("Press Enter here to close Chrome... ")
     except KeyboardInterrupt:
         pass

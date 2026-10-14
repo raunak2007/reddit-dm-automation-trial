@@ -19,13 +19,40 @@ parallelism and automatic target scraping are not implemented yet.
   checks that Reddit prefilled To / Title / Message (retyping any field that
   doesn't match), clicks Send, and waits for Reddit to accept it.
   (`send_dm.send_compose`; the old `/chat/` flow is kept as `send_chat_dm`.)
-- `run_loop.py` reads targets from `target_users.csv`, limits, delays and
-  `subject_template` / `message_template` from `config.json`, builds a compose
-  link per target, and writes every attempt to `contacted.csv`.
+- `run_loop.py <queue.html>` sends each queue entry's own subject and
+  personalized message (taken from its `<pre>` body / compose link). Without a
+  queue it falls back to `target_users.csv` plus `config.json`'s
+  `subject_template` / `message_template`.
 - `open_queue.py <queue.html>` walks a queue file's compose links. By default
-  it opens each one and waits for you to click Send; with `--send` it clicks
-  Send itself, within the same daily cap and delays. Progress is kept in
-  `queue_state/<queue>.json`.
+  it opens each one and waits for you to click Send; with `--send` it sends
+  them itself. Your place in the queue is kept in `queue_state/<queue>.json`.
+- Both scripts share one ledger, `contacted.csv` (`ledger.py`): one row per
+  attempt with its outcome. The daily cap counts today's sends across every
+  run of either script. Each attempt ends as one of:
+  - `sent`
+  - `recipient`: Reddit won't deliver to this user (can't be messaged, no
+    such user). Never retried.
+  - `invalid`: bad username, subject or body. Never retried.
+  - `error`: anything unexplained (timeouts, missing buttons). Retried on
+    later runs, up to `max_attempts_per_recipient` (default 3).
+  - `account`: Reddit is refusing the account itself (rate limit, suspension,
+    logged out). The run stops at once with exit code 2, and the recipient
+    is not charged an attempt.
+
+  Three `error`s in a row also stop the run with exit code 2, since that
+  usually means the account or the page changed, not the recipients.
+- "Already sent" also covers messages sent outside these scripts:
+  - At the start of every run, both scripts read the logged-in account's Reddit
+    sent messages (`old.reddit.com/message/sent/.json`) and record everyone
+    there. If that can't be read, nothing is sent.
+  - Messages sent from **another account** are invisible to that check. In a
+    browser logged in as that account, save the same URL as JSON, then run
+    `python ledger.py import-sent page1.json [page2.json …]`.
+  - A queue page's Sent checkmarks live in the localStorage of the browser that
+    ticked them. Before a queue can be sent, import them once: run the console
+    line that `python open_queue.py <queue.html> --list` prints in the original
+    browser, then `pbpaste | python ledger.py import-checkmarks <queue.html> -`.
+    Pass `--no-checkmarks` to skip this.
 
 ## What it does not do
 
