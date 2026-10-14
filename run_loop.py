@@ -7,10 +7,13 @@ Reads:
                        messaged with config.json's subject_template / message_template
     contacted.csv      every attempt and its outcome (see ledger.py); shared with open_queue.py
 
-Already-sent and undeliverable recipients are skipped; other failures are retried on later runs.
+Already-sent recipients, users Reddit says don't exist and bad entries are skipped; errors and
+refusals (Reddit didn't say whether the recipient or this account was the cause) are retried on later
+runs, up to max_attempts_per_recipient.
 "Already sent" includes everyone in the account's Reddit sent messages (checked at the start of every
 run; no sending if that check fails) and a queue page's imported Sent checkmarks (see ledger.py).
-The run stops (exit code 2) as soon as Reddit refuses the account itself.
+The run stops (exit code 2) as soon as Reddit refuses the account itself, or after 3 errors or 3
+refusals in a row.
 
 Run:
     python run_loop.py <queue.html> [--no-checkmarks]

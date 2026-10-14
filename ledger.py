@@ -1,13 +1,14 @@
 """ledger.py - the one record of who has been messaged, shared by run_loop.py and open_queue.py.
 
 contacted.csv gets one row per attempt: username, status, timestamp, reason.
-status is a send_dm.Result status ('sent', 'recipient', 'invalid', 'account', 'error'); rows written
-before statuses existed say 'failed', which is read as 'error'.
+status is a send_dm.Result status ('sent', 'recipient', 'invalid', 'refused', 'account', 'error'); rows
+written before statuses existed say 'failed', which is read as 'error', and older 'recipient' rows that
+were really refusals ("unable to message ...") are read as 'refused'.
 
 From that history:
     sent_today()      successful sends since local midnight, across every run and both scripts
-    skip_reason(u)    why u must not be sent to again (already sent, Reddit won't deliver, bad entry,
-                      or too many errors), or None if u should be tried
+    skip_reason(u)    why u must not be sent to again (already sent, no such user, bad entry, or too
+                      many failed/refused attempts), or None if u should be tried
     send_loop(...)    sends to a list of targets within config.json's cap and delays, and stops as soon
                       as a failure is about the account rather than the recipient
 
@@ -33,7 +34,7 @@ import time
 from datetime import date, datetime
 from pathlib import Path
 
-from send_dm import Result, send_compose
+from send_dm import NO_SUCH_USER, UNAVAILABLE, Result, send_compose
 
 HERE = Path(__file__).resolve().parent
 LOG = HERE / "contacted.csv"
@@ -41,9 +42,10 @@ IMPORTS = HERE / "queue_state" / "checkmark_imports.json"
 SENT_URL = "https://old.reddit.com/message/sent/.json?limit=100&raw_json=1"
 GET_ITEM_RE = re.compile(r"""localStorage\.getItem\(\s*(?:(\w+)|['"]([^'"]+)['"])\s*\)""")
 FIELDS = ["username", "status", "timestamp", "reason"]
-FINAL = {"sent": "already sent", "recipient": "Reddit won't deliver to them", "invalid": "bad entry"}
-MAX_ATTEMPTS = 3          # 'error' results before a recipient is given up on
+FINAL = {"sent": "already sent", "recipient": "Reddit says no such user", "invalid": "bad entry"}
+MAX_ATTEMPTS = 3          # 'error' + 'refused' results before a recipient is given up on
 MAX_ERRORS_IN_A_ROW = 3   # unexplained failures in a row usually mean the account or the page is the problem
+MAX_REFUSALS_IN_A_ROW = 3 # refusals from several unrelated recipients in a row: check the account before going on
 
 
 def _rows():
@@ -52,7 +54,11 @@ def _rows():
     with open(LOG, newline="") as f:
         rows = list(csv.DictReader(f))
     for r in rows:
-        r["status"] = "error" if r["status"] == "failed" else r["status"]
+        if r["status"] == "failed":
+            r["status"] = "error"
+        elif (r["status"] == "recipient" and re.search(UNAVAILABLE, r.get("reason") or "", re.I)
+              and not re.search(NO_SUCH_USER, r.get("reason") or "", re.I)):
+            r["status"] = "refused"
     return rows
 
 
@@ -208,20 +214,22 @@ def skip_reason(username, max_attempts=MAX_ATTEMPTS):
     for r in mine:
         if r["status"] in FINAL:
             return f"{FINAL[r['status']]} ({r['timestamp']})"
-    errors = sum(1 for r in mine if r["status"] == "error")    # 'account' rows weren't their fault
-    if errors >= max_attempts:
-        return f"gave up after {errors} failed attempts"
+    tries = [r for r in mine if r["status"] in ("error", "refused")]    # 'account' rows weren't about them
+    if len(tries) >= max_attempts:
+        refused = sum(1 for r in tries if r["status"] == "refused")
+        return f"gave up after {len(tries)} attempts ({refused} refused by Reddit, cause not stated)"
     return None
 
 
 def send_loop(driver, targets, cfg, send=send_compose):
     """targets: [(username, compose_link)]. Returns a count per status for this run, plus 'stopped':
-    why the loop ended early ('' if it got through the list), and 'halted': True if that reason was a
-    problem with the account rather than the daily cap."""
+    why the loop ended early ('' if it got through the list), and 'halted': True if it stopped for
+    anything other than the daily cap (an account refusal, or a streak of errors or refusals)."""
     cap = cfg["daily_limit_per_account"]
     max_attempts = cfg.get("max_attempts_per_recipient", MAX_ATTEMPTS)
-    counts = {"sent": 0, "recipient": 0, "invalid": 0, "error": 0, "skipped": 0, "stopped": "", "halted": False}
-    errors_in_a_row = 0
+    counts = {"sent": 0, "recipient": 0, "invalid": 0, "refused": 0, "error": 0, "skipped": 0,
+              "stopped": "", "halted": False}
+    errors_in_a_row = refusals_in_a_row = 0
     for i, (username, link) in enumerate(targets):
         done_today = sent_today()
         if done_today >= cap:
@@ -244,17 +252,26 @@ def send_loop(driver, targets, cfg, send=send_compose):
             counts["stopped"], counts["halted"] = f"Reddit is refusing this account: {result.reason}", True
             break
         counts[result.status] += 1
-        if result.status == "sent":
-            errors_in_a_row = 0
+        errors_in_a_row = errors_in_a_row + 1 if result.status == "error" else 0
+        refusals_in_a_row = refusals_in_a_row + 1 if result.status == "refused" else 0
+        if result.status == "refused":
+            print(f"    [!] Reddit refused without saying why (u/{username}'s settings or a restriction on "
+                  f"this account); may retry on a later run: {result.reason}")
+            if refusals_in_a_row >= MAX_REFUSALS_IN_A_ROW:
+                counts["stopped"] = (f"{refusals_in_a_row} different recipients refused in a row. Reddit doesn't say "
+                                     "why; refusals across unrelated recipients fit a restriction on this account "
+                                     "better than each one's settings, but don't prove it. Before going on, try "
+                                     "messaging an account known to accept messages")
+                counts["halted"] = True
+                break
         elif result.status == "error":
-            errors_in_a_row += 1
             print(f"    [!] failed (will retry on a later run): {result.reason}")
             if errors_in_a_row >= MAX_ERRORS_IN_A_ROW:
                 counts["stopped"] = (f"{errors_in_a_row} failures in a row with no recipient-specific reason; "
                                      "check the account and the saved step*_failed files")
                 counts["halted"] = True
                 break
-        else:
+        elif result.status != "sent":
             print(f"    [!] not sendable ({result.status}), won't retry: {result.reason}")
 
         if result.status != "invalid" and i + 1 < len(targets) and sent_today() < cap:    # invalid never reached Reddit
@@ -266,7 +283,8 @@ def send_loop(driver, targets, cfg, send=send_compose):
 
 def report(counts):
     """Print a run summary; returns the exit code (2 if the loop stopped because of the account)."""
-    print(f"\n[done] sent {counts['sent']}, unreachable {counts['recipient']}, bad entries {counts['invalid']}, "
+    print(f"\n[done] sent {counts['sent']}, refused {counts['refused']}, no such user {counts['recipient']}, "
+          f"bad entries {counts['invalid']}, "
           f"errors {counts['error']}, skipped {counts['skipped']}; {sent_today()} sent today in total")
     if counts["stopped"]:
         print(f"[stopped] {counts['stopped']}")

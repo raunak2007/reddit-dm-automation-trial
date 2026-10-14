@@ -10,7 +10,8 @@ in the queue is kept in queue_state/<queue>.json.
 
 With --send it submits each entry's compose link itself, via the same loop as
 run_loop.py: config.json's daily cap and delays, skipping anyone already sent or
-undeliverable, and stopping (exit code 2) if Reddit refuses the account.
+nonexistent, and stopping (exit code 2) if Reddit refuses the account or several
+recipients in a row.
 
 Before either mode opens anything, everyone in the account's Reddit sent messages is recorded as
 sent (no sending if that check fails), and the queue page's own Sent checkmarks must have been

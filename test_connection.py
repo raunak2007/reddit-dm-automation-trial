@@ -41,7 +41,7 @@ def test_reddit_connection(account_id="account_1"):
             print("    Press ENTER here once you're logged in...")
             input()
         else:
-            print("[+] Appears to be logged in.")
+            print("[+] Appears to be logged in (this only shows the saved session is valid).")
 
         # Try navigating to the chat page
         print("[+] Navigating to chat...")

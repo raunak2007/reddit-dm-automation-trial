@@ -15,8 +15,19 @@ opens it, checks that Reddit prefilled the recipient, title and message, clicks 
 for Reddit to accept it. The older chat-UI flow (/chat/ + recipient search) is still available
 as send_chat_dm.
 
-Returns True once Reddit accepts the message. On failure it prints the step that
-failed, saves <step>_failed.png and <step>_failed_dom.txt, and returns False.
+Returns a Result that is truthy once Reddit accepts the message. On failure it prints the step
+that failed, saves <step>_failed.png and <step>_failed_dom.txt, and returns a falsy Result whose
+status says what Reddit's wording establishes, and no more (see classify()).
+
+What a result does and doesn't show:
+  - "Unable to message this account" and similar refusals don't say whether the recipient's settings
+    or a restriction on the sending account caused them, so they are recorded as 'refused', not
+    blamed on either side.
+  - A refusal in the chat flow (send_chat_dm) is not evidence about the compose flow (send_compose),
+    or the reverse; every Result.reason names the flow it came from.
+  - Being logged in only shows the saved profile's session is valid. The scripts launch Chrome
+    through undetected-chromedriver, and nothing here tests whether that changes how Reddit treats
+    the account; no result should be read as evidence that it does.
 Each step tries XPath, then a selector taken from the real markup, then generic fallbacks.
 Requires Python 3.8+ and Selenium 4.
 """
@@ -50,7 +61,8 @@ START = r"^(start |create )?(a )?new chat$"
 CONFIRM = r"^(start chat(ting)?|start|chat|create chat|next|done|continue|confirm)$"
 SEND = r"^send( a)?( message| chat)?$"
 FAILED = r"fail|unable|couldn.t|can.t|not sent|try again|limit"
-# What Reddit shows for a recipient this account can't message ("Unable to message this account").
+# Reddit refusing a conversation ("Unable to message this account"). The wording doesn't say whether
+# the recipient's message settings or a restriction on the sending account caused it.
 UNAVAILABLE = (r"unable to (message|chat|dm)|can.?t (message|chat|dm)|cannot (message|chat|dm)|"
                r"(not|n.t) accepting (messages|chats|dms)|does ?n.t accept (messages|chats|dms)")
 NO_SUCH_USER = r"invalid username|no matching users|(user|account) (does ?n.t|does not) exist|user not found|no such user"
@@ -288,8 +300,13 @@ return SDM[arguments[0]].apply(null, [].slice.call(arguments, 1));
 
 
 # ----------------------------------------------------------------- plumbing
-class RecipientUnavailable(RuntimeError):
-    """Reddit says this account can't message the recipient; waiting longer won't change that."""
+class MessageRefused(RuntimeError):
+    """Reddit refused to let this account message the recipient. Waiting won't change it, but the refusal
+    doesn't say why: it may be the recipient's settings or a restriction on the sending account."""
+
+
+class NoSuchUser(RuntimeError):
+    """Reddit says the recipient doesn't exist."""
 
 
 class AccountBlocked(RuntimeError):
@@ -297,16 +314,21 @@ class AccountBlocked(RuntimeError):
 
 
 def classify(exc):
-    """What a failure says about who is at fault: 'account', 'recipient' or 'error' (anything else)."""
+    """Only what Reddit's own wording establishes: 'account' (names this account), 'recipient' (no such user),
+    'refused' (refused, cause not stated) or 'error' (anything else)."""
     if isinstance(exc, AccountBlocked):
         return "account"
-    if isinstance(exc, RecipientUnavailable):
+    if isinstance(exc, NoSuchUser):
         return "recipient"
+    if isinstance(exc, MessageRefused):
+        return "refused"
     text = str(exc)
     if re.search(ACCOUNT_LIMITED, text, re.I):
         return "account"
-    if re.search(f"{UNAVAILABLE}|{NO_SUCH_USER}", text, re.I):
+    if re.search(NO_SUCH_USER, text, re.I):
         return "recipient"
+    if re.search(UNAVAILABLE, text, re.I):
+        return "refused"
     return "error"
 
 
@@ -321,8 +343,11 @@ class StepFailed(RuntimeError):
 @dataclass
 class Result:
     """What happened to one send. Truthy only when the message was sent.
-    status: 'sent' | 'recipient' (Reddit won't deliver to this user) | 'invalid' (bad username/subject/body)
-            | 'account' (this account is blocked or rate-limited: stop) | 'error' (anything else: retry later)"""
+    status: 'sent' | 'recipient' (Reddit says no such user) | 'invalid' (bad username/subject/body)
+            | 'refused' (Reddit refused without saying whether the recipient or this account is the cause)
+            | 'account' (this account is blocked or rate-limited: stop) | 'error' (anything else: retry later)
+    reason starts with the flow that produced it ('compose: ' or 'chat: '); a refusal in one flow says
+    nothing about the other."""
     status: str
     reason: str = ""
 
@@ -331,12 +356,17 @@ class Result:
 
 
 def check_recipient(driver, username, row=None, page=True):
-    """Raise RecipientUnavailable at once if u/username's result row or the page says they can't be messaged."""
+    """Raise at once if u/username's result row or the page shows a refusal (MessageRefused) or says
+    there is no such user (NoSuchUser)."""
     row = row is not None and _live(row)
-    why = ((row and js(driver, "blocked", row, UNAVAILABLE))
-           or (page and js(driver, "notice", f"{UNAVAILABLE}|{NO_SUCH_USER}")))
+    if page:
+        missing = js(driver, "notice", NO_SUCH_USER)
+        if missing:
+            raise NoSuchUser(f"Reddit says there is no user u/{username}: {missing!r}")
+    why = (row and js(driver, "blocked", row, UNAVAILABLE)) or (page and js(driver, "notice", UNAVAILABLE))
     if why:
-        raise RecipientUnavailable(f"Reddit won't let this account message u/{username}: {why!r}")
+        raise MessageRefused(f"Reddit refused a conversation with u/{username}: {why!r} (it doesn't say whether "
+                             "that is their message settings or a restriction on this account)")
 
 
 def check_account(driver):
@@ -654,7 +684,7 @@ def pick_result(driver, username, field):
             elif seen["no_user"] is None:
                 seen["no_user"] = time.monotonic()
             elif time.monotonic() - seen["no_user"] > 2:
-                raise RecipientUnavailable(f"Reddit found no user u/{username}: {missing!r}")
+                raise NoSuchUser(f"Reddit found no user u/{username}: {missing!r}")
             return False
         row, via = hit
         check_recipient(d, username, row, page=False)    # a disabled row is not a match to click
@@ -887,7 +917,7 @@ def send_compose(driver, link):
             raise ValueError("compose link has no subject; Reddit requires a title")
     except ValueError as exc:
         print(f"[!] not sending: {exc}")
-        return Result("invalid", str(exc))
+        return Result("invalid", f"compose: {exc}")
     try:
         driver.switch_to.default_content()
         with step(driver, "step1_open_compose", f"opening the compose link for u/{want['to']}"):
@@ -900,7 +930,7 @@ def send_compose(driver, link):
         with step(driver, "step4_confirm", "waiting for Reddit to accept the message"):
             confirm_compose(driver, form, alerts, want["to"])
     except StepFailed as exc:
-        return Result(exc.kind, str(exc))
+        return Result(exc.kind, f"compose: {exc}")
     print(f"[done] message to {want['to']} sent")
     return Result("sent")
 
@@ -911,7 +941,7 @@ def send_dm(driver, username, message, *, subject=DEFAULT_SUBJECT):
         link = compose_link(username, message, subject)
     except ValueError as exc:
         print(f"[!] not sending: {exc}")
-        return Result("invalid", str(exc))
+        return Result("invalid", f"compose: {exc}")
     return send_compose(driver, link)
 
 
@@ -922,7 +952,7 @@ def send_chat_dm(driver, username, message, *, verify_recipient=True):
         username, message = _clean(username, message)
     except ValueError as exc:
         print(f"[!] not sending: {exc}")
-        return Result("invalid", str(exc))
+        return Result("invalid", f"chat: {exc}")
     needle = _needle(message)
 
     try:
@@ -942,7 +972,7 @@ def send_chat_dm(driver, username, message, *, verify_recipient=True):
         with step(driver, "step7_confirm", "waiting for the message to show up in the thread"):
             confirm_sent(driver, box, needle, baseline, alerts)
     except StepFailed as exc:
-        return Result(exc.kind, str(exc))
+        return Result(exc.kind, f"chat: {exc}")
     finally:
         try:
             driver.switch_to.default_content()
