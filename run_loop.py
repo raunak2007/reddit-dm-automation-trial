@@ -3,10 +3,11 @@
 Reads:
     config.json        sender_username, daily_limit_per_account, min/max delays, subject_template,
                        message_template, max_attempts_per_recipient (optional, default 3)
-    <queue.html>       if given: each entry's compose link, used exactly as written (entries whose link,
-                       checkbox, heading and <pre> body disagree are reported and not sent)
-    target_users.csv   if no queue is given: one username per row (header row "username"),
-                       messaged with config.json's subject_template / message_template
+    <queue.html>       required: each entry's compose link, used exactly as written, so every recipient
+                       gets the personalized subject and message the queue page shows (entries whose
+                       link, checkbox, heading and <pre> body disagree are reported and not sent)
+    target_users.csv   only with --from-csv: one username per row (header row "username"), messaged
+                       with config.json's generic subject_template / message_template
     contacted.csv      every attempt and its outcome (see ledger.py); shared with open_queue.py
 
 Each run: takes a lock (one run at a time), checks the browser is logged in as sender_username, records
@@ -18,7 +19,7 @@ failures, refusals or uncertain sends.
 
 Run:
     python run_loop.py <queue.html> [--no-checkmarks]
-    python run_loop.py
+    python run_loop.py --from-csv      (generic template, not a queue's personalized messages)
 """
 import argparse
 import csv
@@ -45,10 +46,13 @@ def load_config():
 
 
 def load_targets(cfg, queue=None):
-    """[(username, compose_link)]. Queue links are taken exactly as written; CSV targets get a link built
-    from config.json's templates."""
+    """[(username, compose_link)]. Queue links are taken exactly as written, so each entry keeps its own
+    subject and message; with no queue, CSV targets get a link built from config.json's templates."""
     if queue:
-        return [(e["to"], e["link"]) for e in parse_queue(queue) if not e["problem"]]
+        entries = [e for e in parse_queue(queue) if not e["problem"]]
+        print(f"[+] {len(entries)} sendable entries from {queue.name}; each is sent with its own subject and message")
+        return [(e["to"], e["link"]) for e in entries]
+    print(f"[!] --from-csv: messaging {TARGETS.name} with config.json's generic template, not a queue's messages")
     with open(TARGETS, newline="") as f:
         names = [row["username"].strip() for row in csv.DictReader(f) if row.get("username", "").strip()]
     subject = cfg.get("subject_template", DEFAULT_SUBJECT)
@@ -63,14 +67,21 @@ def load_targets(cfg, queue=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("queue", nargs="?", type=Path, help="queue .html to send from (default: target_users.csv)")
+    ap.add_argument("queue", nargs="?", type=Path, help="queue .html to send from (required unless --from-csv)")
+    ap.add_argument("--from-csv", action="store_true",
+                    help="send to target_users.csv with config.json's generic template instead of a queue")
     ap.add_argument("--no-checkmarks", action="store_true",
                     help="send even though the queue page's Sent checkmarks haven't been imported")
     args = ap.parse_args()
+    if bool(args.queue) == args.from_csv:
+        ap.error("give a queue .html (its personalized messages are sent), or --from-csv for the generic "
+                 "template, not both")
     if args.queue and not args.queue.is_file():
         raise SystemExit(f"Queue file not found: {args.queue}")
     if args.queue and not args.no_checkmarks and not ledger.checkmarks_imported(args.queue):
         raise SystemExit(ledger.checkmark_help(args.queue))
+    if args.queue and ledger.checkmarks_note(args.queue):
+        print(ledger.checkmarks_note(args.queue))
     if not PROFILE.is_dir():
         raise SystemExit(f"Profile folder not found: {PROFILE}\nLog in once with test_connection.py first.")
 

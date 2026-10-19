@@ -43,16 +43,16 @@ def test_reddit_connection(account_id="account_1"):
         else:
             print("[+] Appears to be logged in (this only shows the saved session is valid).")
 
-        # Try navigating to the chat page
-        print("[+] Navigating to chat...")
-        driver.get("https://www.reddit.com/chat/")
+        # Try navigating to the compose page (the page the queue's links open)
+        print("[+] Navigating to compose...")
+        driver.get("https://www.reddit.com/message/compose/")
         time.sleep(random.uniform(4, 8))
-        print(f"[+] Chat URL: {driver.current_url}")
-        print(f"[+] Chat title: {driver.title}")
+        print(f"[+] Compose URL: {driver.current_url}")
+        print(f"[+] Compose title: {driver.title}")
 
         # Save a screenshot for evidence
-        driver.save_screenshot(f"accounts/{account_id}/chat_page.png")
-        print(f"[+] Screenshot saved to accounts/{account_id}/chat_page.png")
+        driver.save_screenshot(f"accounts/{account_id}/compose_page.png")
+        print(f"[+] Screenshot saved to accounts/{account_id}/compose_page.png")
 
         print("[+] Holding browser open for 60s so you can inspect it...")
         time.sleep(60)

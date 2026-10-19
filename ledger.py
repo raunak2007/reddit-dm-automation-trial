@@ -53,6 +53,8 @@ LOG = HERE / "contacted.csv"
 STATE = HERE / "queue_state"
 IMPORTS = STATE / "checkmark_imports.json"
 LOCK = STATE / "send.lock"
+DATA_U_RE = re.compile(r"""<input\b[^>]*\bdata-u\s*=\s*["']?([^"'\s>]+)""", re.I)
+SENT_LISTING_CAP = 1000     # Reddit lists only about this many of the newest sent messages
 GET_ITEM_RE = re.compile(r"""localStorage\.getItem\(\s*(?:(\w+)|['"]([^'"]+)['"])\s*\)""")
 FIELDS = ["username", "status", "timestamp", "reason"]
 FINAL = {"sent": "already sent", "recipient": "Reddit says no such user"}
@@ -152,9 +154,10 @@ def _sent_listing(text, where):
 def _record_sent(pages, source):
     """Record every recipient in these sent-message listing pages not already marked sent."""
     have = _already_sent()
-    found, added = set(), 0
+    found, added, messages = set(), 0, 0
     for data in pages:
         for child in data["children"]:
+            messages += 1
             msg = child["data"]
             dest = (msg.get("dest") or "").removeprefix("u/")
             if not dest or dest.startswith("#") or key(dest) in found:     # '#...' = modmail to a subreddit
@@ -166,10 +169,15 @@ def _record_sent(pages, source):
                 have.add(key(dest))
                 added += 1
     print(f"[+] {source}: {len(found)} recipients, {added} not in the ledger before")
+    if messages >= SENT_LISTING_CAP - 100:
+        print(f"[!] {source}: {messages} messages listed. Reddit only lists about the newest {SENT_LISTING_CAP}, so "
+              f"anyone messaged before those isn't visible here. If older sends may overlap this queue, import "
+              f"the queue page's checkmarks (and saved sent-folder pages from other accounts: python ledger.py "
+              f"import-sent).", file=sys.stderr)
     return added
 
 
-def sync_reddit_sent(driver, max_pages=10):
+def sync_reddit_sent(driver, max_pages=SENT_LISTING_CAP // 100 + 2):
     """Record everyone the logged-in account has sent a private message to (Reddit's sent folder,
     newest 100 x max_pages; Reddit lists at most ~1000) and isn't already marked sent here.
     Raises RuntimeError if the folder can't be read, so callers can refuse to send blind."""
@@ -204,22 +212,61 @@ def storage_key(queue_html: str):
     return var and var.group(1)
 
 
+def _import_id(queue_path: Path, html: str):
+    """What an import of this page's checkmarks is filed under: its localStorage key, or, when the page's
+    script doesn't name one this can parse, the file name. None if the page has no Sent checkboxes."""
+    k = storage_key(html)
+    if k:
+        return k
+    return f"file:{queue_path.name}" if DATA_U_RE.search(html) else None
+
+
+def _imports():
+    return json.loads(IMPORTS.read_text()) if IMPORTS.exists() else {}
+
+
 def checkmarks_imported(queue_path: Path):
-    k = storage_key(queue_path.read_text(encoding="utf-8"))
-    if not k:
-        return True                                   # page has no checkboxes to import
-    return IMPORTS.exists() and k in json.loads(IMPORTS.read_text())
+    k = _import_id(queue_path, queue_path.read_text(encoding="utf-8"))
+    return not k or k in _imports()                   # no checkboxes on the page: nothing to import
+
+
+def checkmarks_note(queue_path: Path):
+    """When this page's checkmarks were imported, as a reminder that boxes ticked since then aren't known."""
+    done = _imports().get(_import_id(queue_path, queue_path.read_text(encoding="utf-8")) or "")
+    if done:
+        return (f"[+] {queue_path.name}: {done['checked']} Sent checkmarks imported {done['imported_at']}. Boxes ticked "
+                f"in the original browser after that aren't known here; import again if there are any.")
+    return None
+
+
+def _marks(exported, queue_users):
+    """{username: day} from what the page stores ({"user": "YYYY-MM-DD"}), or from a dump of the whole of
+    localStorage ({key: "<that JSON as a string>"}), keeping the stored objects that name this queue's users."""
+    data = json.loads(exported or "{}")
+    if not isinstance(data, dict):
+        raise SystemExit("Expected a JSON object like {\"username\": \"2026-10-13\"}.")
+    users = {key(u) for u in queue_users}
+    if not users or any(key(u) in users for u in data):
+        return data
+    marks = {}
+    for value in data.values():                       # a whole-localStorage dump
+        try:
+            stored = json.loads(value) if isinstance(value, str) else value
+        except ValueError:
+            continue
+        if isinstance(stored, dict) and any(key(u) in users for u in stored):
+            marks.update(stored)
+    return marks
 
 
 def import_checkmarks(queue_path: Path, exported: str):
     """exported: the JSON the queue page stores, {"username": "YYYY-MM-DD", ...}. Records each
     checked user as sent on that date (noon), unless already marked sent."""
-    k = storage_key(queue_path.read_text(encoding="utf-8"))
+    html = queue_path.read_text(encoding="utf-8")
+    k = _import_id(queue_path, html)
     if not k:
-        raise SystemExit(f"{queue_path.name} has no localStorage Sent checkboxes to import.")
-    marks = json.loads(exported or "{}")
-    if not isinstance(marks, dict):
-        raise SystemExit("Expected a JSON object like {\"username\": \"2026-10-13\"}.")
+        raise SystemExit(f"{queue_path.name} has no Sent checkboxes to import.")
+    marks = {u: day for u, day in _marks(exported, DATA_U_RE.findall(html)).items() if day}
     have = _already_sent()
     added = 0
     for username, day in marks.items():
@@ -233,7 +280,7 @@ def import_checkmarks(queue_path: Path, exported: str):
         have.add(key(username))
         added += 1
     STATE.mkdir(exist_ok=True)
-    done = json.loads(IMPORTS.read_text()) if IMPORTS.exists() else {}
+    done = _imports()
     done[k] = {"queue": queue_path.name, "imported_at": datetime.now().isoformat(timespec="seconds"),
                "checked": len(marks)}
     IMPORTS.write_text(json.dumps(done, indent=2))
@@ -242,10 +289,12 @@ def import_checkmarks(queue_path: Path, exported: str):
 
 def checkmark_help(queue_path: Path):
     k = storage_key(queue_path.read_text(encoding="utf-8"))
+    get = (f"copy(localStorage.getItem('{k}') || '{{}}')" if k else
+           "copy(JSON.stringify(Object.assign({}, localStorage)))     (the page's key couldn't be read, so all of it)")
     return (f"{queue_path.name} keeps its Sent checkmarks in the localStorage of the browser they were ticked in,\n"
             f"which this Chrome profile can't see. Import them once before sending:\n"
             f"  1. Open {queue_path.name} in the ORIGINAL browser, open the console (Cmd+Opt+J / Cmd+Opt+C), run:\n"
-            f"       copy(localStorage.getItem('{k}') || '{{}}')\n"
+            f"       {get}\n"
             f"  2. pbpaste | python ledger.py import-checkmarks \"{queue_path}\" -\n"
             f"(Or pass --no-checkmarks to send without them; Reddit's sent folder is still checked.)")
 
@@ -272,14 +321,15 @@ def prepare(driver, cfg):
 
 # ----------------------------------------------------------------- decisions
 def sent_today():
-    """Recipients that got a message today, counting uncertain and interrupted submissions (they may have
-    gone out), each recipient once."""
+    """Recipients that got a message today, each once, across every run (rebuilt from contacted.csv, so
+    nothing resets between runs). Still-unresolved uncertain or interrupted submissions from today count
+    too, since they may have gone out; one resolved --not-sent (a later 'cleared' row) doesn't."""
     today = date.today().isoformat()
     users = set()
     for user, rows in _history().items():
-        if any(r["status"] in ("sent", "uncertain") and r["timestamp"].startswith(today) for r in rows):
+        if any(r["status"] == "sent" and r["timestamp"].startswith(today) for r in rows):
             users.add(user)
-        elif rows[-1]["status"] == "submitting" and rows[-1]["timestamp"].startswith(today):
+        elif rows[-1]["status"] in HELD and rows[-1]["timestamp"].startswith(today):
             users.add(user)
     return len(users)
 
@@ -377,6 +427,8 @@ def send_loop(driver, targets, cfg, sender, send=send_compose):
         counts[result.status] += 1
         if result.status != "sent":
             print(f"    [!] {NOTES.get(result.status, result.status)}: {result.reason}")
+        if result.status == "invalid":                    # never reached Reddit: says nothing about the account
+            continue
         streak = ({"status": result.status, "n": streak["n"] + 1} if result.status == streak["status"]
                   else {"status": result.status, "n": 1})
         limit, why = STREAKS.get(result.status, (None, ""))
@@ -384,7 +436,7 @@ def send_loop(driver, targets, cfg, sender, send=send_compose):
             counts["stopped"], counts["halted"] = f"{streak['n']} {why}", True
             break
 
-        if result.status != "invalid" and i + 1 < len(targets) and sent_today() < cap:
+        if i + 1 < len(targets) and sent_today() < cap:
             delay = random.uniform(cfg["min_delay_seconds"], cfg["max_delay_seconds"])
             print(f"[+] Waiting {delay:.0f}s before the next one...")
             time.sleep(delay)
@@ -438,8 +490,6 @@ def main():
     elif args.cmd == "resolve":
         resolve(args.username, args.sent)
     else:
-        if not storage_key(args.queue.read_text(encoding="utf-8")):
-            sys.exit(f"{args.queue.name} has no localStorage Sent checkboxes.")
         text = sys.stdin.read() if args.exported == "-" else Path(args.exported).read_text()
         import_checkmarks(args.queue, text.strip())
 

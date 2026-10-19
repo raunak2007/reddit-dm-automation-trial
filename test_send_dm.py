@@ -4,6 +4,8 @@ import time
 import random
 import os
 
+from send_dm import compose_link
+
 def test_send_dm(account_id, target_username, message):
     profile_dir = os.path.abspath(f"accounts/{account_id}/chrome_profile")
     os.makedirs(profile_dir, exist_ok=True)
@@ -16,20 +18,20 @@ def test_send_dm(account_id, target_username, message):
     driver = uc.Chrome(options=options, version_main=chrome_major())
 
     try:
-        print("[+] Opening chat...")
-        driver.get("https://www.reddit.com/chat/")
+        print("[+] Opening the compose link...")
+        driver.get(compose_link(target_username, message))
         time.sleep(random.uniform(4, 7))
 
-        print(f"[+] Chat title: {driver.title}")
-        driver.save_screenshot(f"accounts/{account_id}/chat_before_send.png")
+        print(f"[+] Compose title: {driver.title}")
+        driver.save_screenshot(f"accounts/{account_id}/compose_before_send.png")
 
         # Hold open so you can send the DM manually the first time
-        print(f"[!] MANUAL STEP: Send '{message}' to u/{target_username} in this window.")
+        print(f"[!] MANUAL STEP: the form is prefilled for u/{target_username}. Review it and click Send.")
         print("    Do it by hand first. Press ENTER once the message is sent.")
         input()
 
-        driver.save_screenshot(f"accounts/{account_id}/chat_after_send.png")
-        print("[+] Screenshot saved. Check chat_after_send.png to confirm the message went through.")
+        driver.save_screenshot(f"accounts/{account_id}/compose_after_send.png")
+        print("[+] Screenshot saved. Check compose_after_send.png to confirm the message went through.")
         time.sleep(10)
 
     except Exception as e:
