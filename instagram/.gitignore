@@ -1,0 +1,6 @@
+accounts/
+data/
+.env
+__pycache__/
+*.pyc
+debug/
