@@ -1,10 +1,11 @@
-"""send.py - send the DMs you approved on the review page, the way the Reddit scripts send theirs
-(open_queue.py, run_loop.py and ledger.py on master).
+"""send.py - send DMs to the commenters qualify.py picked, the way run_loop.py sends the Reddit queue (run_loop.py
+and ledger.py on master): no approving, no pressing Send yourself. It never follows anyone.
 
-Only commenters you clicked "Approve for sending" on are sent, each with exactly the text you approved, best
-score first. By default nothing is sent for you: each approved commenter's chat is opened with the message
-typed in, you press Enter in Instagram yourself (and follow them first if you want), then say so here, and the
-chat is reloaded to confirm it. With --auto it presses Send itself, like run_loop.py. It never follows anyone.
+With outreach.auto_approve (the default), every new lead at or above ai.min_score is approved with its drafted DM
+(or your edit of it, if you edited it on the review page) at the start of each run, then sent, best score first;
+leads you skipped, unapproved or marked are left alone. Send is pressed for you. With auto_approve false, only
+commenters you clicked "Approve for sending" on are sent. --by-hand opens each chat with the message typed in and
+waits for you to press Enter in Instagram instead.
 
 Each run: takes a lock (one run at a time), checks the browser is logged in as config.json's
 outreach.sender_user_id, then for each approved commenter opens their chat, checks it is with them and doesn't
@@ -15,8 +16,8 @@ streaks of failures, refusals or uncertain sends. outreach.daily_dm_limit counts
 or marked sent by hand, and commenters the AI thinks are under 18 are never sent to unless
 outreach.minor_policy is "allow".
 
-    python send.py                  by hand: you press Send in each chat
-    python send.py --auto           press Send automatically
+    python send.py                  approve new leads and press Send for each, on its own
+    python send.py --by-hand        you press Send in each chat
     python send.py --list           the approved commenters and why any would be skipped (no browser)
     python send.py held             people whose last send couldn't be confirmed
     python send.py resolve <username> --sent | --not-sent
@@ -32,6 +33,7 @@ from pathlib import Path
 
 import browser
 import direct
+import queue_server
 import store
 from send_dm import ACCOUNT_WIDE, AccountBlocked, Result
 
@@ -84,10 +86,10 @@ def why_not(lead, cfg, max_attempts):
     return store.skip_reason(lead["username"], max_attempts)
 
 
-def prepare(driver, cfg):
+def prepare(driver, cfg, interactive=False):
     """Start of every run, before any chat is opened: confirm the browser is logged in as
     outreach.sender_user_id and the inbox is usable. Exits on any problem. Returns the sender's id."""
-    browser.ensure_logged_in(driver, cfg, interactive=True)
+    browser.ensure_logged_in(driver, cfg, interactive=interactive)
     me = (driver.get_cookie("ds_user_id") or {}).get("value")
     expected = str(cfg["outreach"].get("sender_user_id") or "").strip()
     if not me:
@@ -261,10 +263,13 @@ def print_list(leads, cfg):
     print(f"{len(leads)} approved; {store.sent_today()}/{cfg['outreach']['daily_dm_limit']} DMs sent today")
 
 
-def run(cfg, auto=False):
+def run(cfg, by_hand=False):
+    if cfg["outreach"].get("auto_approve", True):
+        n = queue_server.auto_approve()
+        print(f"[+] auto-approved {n} new commenters with their drafted DMs (outreach.auto_approve)")
     leads = approved_leads()
     if not leads:
-        print("[+] Nothing approved to send. Approve DMs on the review page first (python run.py queue).")
+        print("[+] Nothing approved to send.")
         return 0
     print(f"[+] {len(leads)} approved commenters")
     with store.lock():
@@ -273,8 +278,8 @@ def run(cfg, auto=False):
             raise SystemExit(f"Already sent {store.sent_today()}/{cap} today. Nothing to do until tomorrow.")
         driver = browser.make_driver(cfg)
         try:
-            prepare(driver, cfg)
-            if auto:
+            prepare(driver, cfg, interactive=by_hand)
+            if not by_hand:
                 return report(send_loop(driver, leads, cfg))
             code = report(walk_by_hand(driver, leads, cfg))
             input("Press Enter to close Chrome... ")
@@ -285,12 +290,11 @@ def run(cfg, auto=False):
         finally:
             driver.quit()
 
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="run", choices=["run", "held", "resolve"])
     ap.add_argument("username", nargs="?", help="for resolve: the username from python send.py held")
-    ap.add_argument("--auto", action="store_true", help="press Send automatically instead of waiting for you")
+    ap.add_argument("--by-hand", action="store_true", help="open each chat and wait for you to press Send")
     ap.add_argument("--list", action="store_true", dest="list_only")
     which = ap.add_mutually_exclusive_group()
     which.add_argument("--sent", action="store_true", help="resolve: it did go out, never message them again")
@@ -311,7 +315,7 @@ def main():
     elif args.list_only:
         print_list(approved_leads(), cfg)
     else:
-        sys.exit(run(cfg, args.auto))
+        sys.exit(run(cfg, args.by_hand))
 
 
 if __name__ == "__main__":

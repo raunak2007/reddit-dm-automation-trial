@@ -2,20 +2,21 @@
 
 Finds recent Facebook posts from students and parents who need help with college admissions,
 essays, scholarships, financial aid or internships. Claude scores each post and drafts a
-personalized message pointing them to your booking link. You review each one in a local queue,
-approve the ones worth sending, and `send.py` sends them the way the Reddit scripts on `master`
-send theirs.
+personalized message pointing them to your booking link. Then `send.py` sends them the way
+`run_loop.py` sends the Reddit queue on `master`: no approving, and it presses Send itself.
 
 ```
-scrape.py ──► data/leads.json ──► qualify.py (Claude) ──► queue_server.py ──► send.py ──► Messenger
- (your logged-in            (score, flags,            (review, edit,      (by hand, or     data/contacted.csv
-  Facebook session)          DM + comment drafts)      approve)            --auto)          (who's been contacted)
+scrape.py ──► data/leads.json ──► qualify.py (Claude) ──► send.py ──► Messenger
+ (your logged-in            (score, flags,            (approves new     data/contacted.csv
+  Facebook session)          DM + comment drafts)      leads, sends)     (who's been contacted)
+
+queue_server.py (optional): look at leads, edit drafts or skip people before a send
 ```
 
-**Nothing is sent that you haven't approved**, with the exact text you approved. By default
-`send.py` only opens each chat with the message typed in and you press Enter. With `--auto` it
-presses Send itself. Facebook restricts accounts that send automated messages to people they
-aren't friends with, so keep `--auto` runs small (see Guardrails). Many people posting about
+**Every new lead at or above `ai.min_score` is sent its drafted DM** (`outreach.auto_approve`, on
+by default). Set `auto_approve` to `false` to send only what you approve in the queue, or use
+`send --by-hand` to press Enter in each chat yourself. Facebook restricts accounts that send
+automated messages to people they aren't friends with, so keep runs small (see Guardrails). Many people posting about
 admissions are under 18, and those authors are never DMed by default.
 
 ## How this fits with the Reddit scripts
@@ -25,8 +26,8 @@ admissions are under 18, and those authors are never DMed by default.
 
 | Reddit (repo root) | Facebook (this folder) |
 |---|---|
-| queue `.html` you curate | leads you **Approve for sending** in the review queue |
-| `open_queue.py` (you click Send) / `--send` | `send.py` (you press Enter) / `--auto` |
+| queue `.html` you curate | every new lead (`outreach.auto_approve`), or the ones you **Approve for sending** |
+| `run_loop.py` (presses Send) / `open_queue.py` (you click Send) | `send.py` / `send.py --by-hand` |
 | `sender_username`, checked via `/api/me` | `outreach.sender_user_id`, checked via the `c_user` cookie |
 | confirmed in the sent folder | confirmed in the chat after reloading it |
 | `contacted.csv`: `submitting`, `uncertain` = held | `data/contacted.csv`: the same statuses |
@@ -78,11 +79,11 @@ run `python run.py qualify --rescore` to redraft every lead.
 ## Daily use
 
 ```bash
-python run.py                      # scrape -> score/draft -> open the review queue
+python run.py                      # scrape -> score/draft -> send
 python run.py scrape --limit-pages 1   # quick test on one search page
-python run.py queue                # reopen the queue without scraping
-python run.py send                 # send what you approved: you press Enter in each chat
-python run.py send --auto          # ...or let it press Send
+python run.py queue                # look at leads, edit drafts or skip people (optional)
+python run.py send                 # approve new leads and press Send for each
+python run.py send --by-hand       # ...or you press Enter in each chat
 python run.py stats
 python send.py --list              # what's approved and why any would be skipped
 python send.py held                # sends that couldn't be confirmed
@@ -99,7 +100,10 @@ In the queue (http://127.0.0.1:8765):
 | **Copy comment & open post** / **Mark commented** | Use a helpful public reply instead of a DM. |
 | **Skip** / **Not relevant** | Hides the post. "Not relevant" also keeps a record of where the AI was wrong. |
 
-Edits to drafts save automatically. Leads are sorted by score.
+Edits to drafts save automatically. Leads are sorted by score. With `outreach.auto_approve` on, you
+don't need the queue: each send run approves every lead still in **To review** with its draft (your
+edit, if you made one). To keep someone out, **Skip** or **Not relevant** them, or **Unapprove**
+them, before the next run.
 
 ## Sending
 
@@ -128,8 +132,7 @@ runs at a time. Don't scrape while it runs: they share the Chrome profile.
 
 - **Daily DM cap** (`outreach.daily_dm_limit`, default 20), counted across every run from
   `data/contacted.csv`: `send.py` sends, **Mark sent** clicks, and held sends from today. Both the queue
-  server and `send.py` enforce it. New or low-activity accounts should start around 10, especially
-  with `--auto`.
+  server and `send.py` enforce it. New or low-activity accounts should start around 10.
 - **One DM per person, ever.** That includes held sends: their other posts aren't offered.
 - **Minors** (`outreach.minor_policy`): if the AI thinks the author is under 18, the default
   `comment_only` turns off the DM and offers only the public comment. Set it to `skip` to hide

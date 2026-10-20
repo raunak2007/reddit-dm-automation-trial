@@ -2,18 +2,18 @@
 
 Give it the link to an Instagram post or reel. It reads everyone who commented, has Claude pick out
 the ones asking about college admissions, essays, scholarships or internships, and writes each of
-them a short, casual DM that starts with their name. You approve the DMs worth sending on a review
-page, and `send.py` sends them the way the Reddit scripts on `master` send theirs.
+them a short, casual DM that starts with their name. Then `send.py` sends them the way `run_loop.py`
+sends the Reddit queue on `master`: no approving, and it presses Send itself.
 
 ```bash
-python run.py https://www.instagram.com/p/XXXXXXXX/    # read comments, draft DMs, open the review page
-python run.py send                                     # send what you approved
+python run.py https://www.instagram.com/p/XXXXXXXX/    # read comments, draft DMs, send them
+python run.py send                                     # send any drafted DMs that haven't gone out yet
 ```
 
-**Nothing is sent that you haven't approved**, with the exact text you approved, and **it never
-follows anyone.** By default `send.py` only opens each chat with the DM typed in and you press Enter.
-With `--auto` it presses Send itself. Instagram restricts accounts quickly for automated DMs, so keep
-`--auto` runs small (see Limits). Many commenters on admissions posts are teenagers, and those are
+**Every new lead at or above `ai.min_score` is sent its drafted DM** (`outreach.auto_approve`, on by
+default), and **it never follows anyone.** Set `auto_approve` to `false` to send only what you approve
+on the review page, or use `send --by-hand` to press Enter in each chat yourself. Instagram restricts
+accounts quickly for automated DMs, so keep runs small (see Limits). Many commenters on admissions posts are teenagers, and those are
 never DMed by default.
 
 ## How this fits with the Reddit scripts
@@ -23,8 +23,8 @@ never DMed by default.
 
 | Reddit (repo root) | Instagram (this folder) |
 |---|---|
-| queue `.html` you curate | commenters you **Approve for sending** on the review page |
-| `open_queue.py` (you click Send) / `--send` | `send.py` (you press Enter) / `--auto` |
+| queue `.html` you curate | every new lead (`outreach.auto_approve`), or the ones you **Approve for sending** |
+| `run_loop.py` (presses Send) / `open_queue.py` (you click Send) | `send.py` / `send.py --by-hand` |
 | `sender_username`, checked via `/api/me` | `outreach.sender_user_id`, checked via the `ds_user_id` cookie |
 | confirmed in the sent folder | confirmed in the chat after reloading it |
 | `contacted.csv`: `submitting`, `uncertain` = held | `data/contacted.csv`: the same statuses |
@@ -83,6 +83,10 @@ which you can edit.
 2. **Approve for sending**: keeps the DM exactly as it is now; `python run.py send` sends it. It moves
    to the **Approved** tab, where **Unapprove** takes it back until it's sent.
 
+With `outreach.auto_approve` on, you don't need this page: each send run approves every lead still in
+**To send** with its draft (your edit, if you made one). To keep someone out, **Skip** or **Not a lead**
+them, or **Unapprove** them, before the next run.
+
 Or send it yourself: **Copy DM & open chat** copies the DM and opens a chat; paste it, send it, then
 **Mark sent**. Either way that person is never offered again, from any post.
 
@@ -91,8 +95,8 @@ Or send it yourself: **Copy DM & open chat** copies the DM and opens a chat; pas
 ## Sending
 
 ```bash
-python run.py send            # by hand: each chat opens with the DM typed in; you press Enter
-python run.py send --auto     # ...or let it press Send
+python run.py send            # approve new leads and press Send for each
+python run.py send --by-hand  # ...or each chat opens with the DM typed in and you press Enter
 python send.py --list         # what's approved and why any would be skipped
 python send.py held           # sends that couldn't be confirmed
 python send.py resolve <username> --sent | --not-sent
@@ -138,7 +142,7 @@ runs at a time. Don't read comments while it runs: they share the Chrome profile
 | `comments.py` | Reads all comments and replies, using Instagram's own web endpoint inside your logged-in session. Falls back to reading the page. |
 | `qualify.py` | Scores each comment with Claude and writes the DM. |
 | `queue_server.py`, `queue.html` | The review page. |
-| `send.py` | Sends the approved DMs (by hand or `--auto`), records and checks every attempt. |
+| `send.py` | Approves new leads (`outreach.auto_approve`) and sends the DMs (or `--by-hand`), records and checks every attempt. |
 | `direct.py` | Sends one DM and confirms it in the chat. |
 | `store.py` | `data/leads.json` and the ledger in `data/contacted.csv`. |
 | `data/` | `leads.json` (commenters and drafts) and `contacted.csv` (who you've DMed). Not committed. |

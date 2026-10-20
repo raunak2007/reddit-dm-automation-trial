@@ -141,6 +141,30 @@ def mark(body: dict) -> tuple[HTTPStatus, dict]:
     return HTTPStatus.OK, {"ok": True, "sent_today": store.sent_today()}
 
 
+def auto_approve() -> int:
+    """Approve every lead waiting in "To review" that may be DMed, with its draft as it stands, as if you'd clicked
+    "Approve for sending" on each (outreach.auto_approve). Leads you skipped, unapproved or marked are left alone.
+    Returns how many were approved."""
+    cfg = _cfg()
+    with WRITE:
+        leads, handled, hist = store.load_leads(), store.handled_posts(), store.history()
+        at, picked = datetime.now().isoformat(timespec="seconds"), []
+        for lead in leads.values():
+            if "ai" not in lead or handled.get(lead["post_key"]) == "unapproved":
+                continue
+            text = lead.get("edited", {}).get("dm", lead["ai"]["dm"])
+            if (status_of(lead, cfg, handled, hist) != "todo" or not dm_allowed(lead, cfg)
+                    or not lead.get("author_key") or not text.strip()):
+                continue
+            lead["approved"] = {"dm": text, "at": at, "auto": True}
+            picked.append((lead, text))
+        store.save_leads(leads)                   # before the rows, so every 'approved' row has its text
+        for lead, text in picked:
+            store.record(lead["author_key"], lead.get("author", ""), lead["post_key"], "approved",
+                         note=f"auto-approved: {text}"[:300])
+    return len(picked)
+
+
 def save_draft(body: dict) -> tuple[HTTPStatus, dict]:
     with WRITE:
         leads = store.load_leads()

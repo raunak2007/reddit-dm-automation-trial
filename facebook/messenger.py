@@ -243,7 +243,7 @@ def verify_in_chat(driver, chat_url, text, timeout=VERIFY_TIMEOUT):
                 raise NotInSent(f"the message isn't in the chat after reloading it for {timeout}s") from None
 
 
-# ----------------------------------------------------------------- by hand (send.py without --auto)
+# ----------------------------------------------------------------- by hand (send.py --by-hand)
 def open_for_hand(driver, chat_url, text, name):
     """Open the chat and type the message in, leaving Send to you. A Result if Facebook refuses first or the
     message is already in the chat, else None."""

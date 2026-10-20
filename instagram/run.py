@@ -1,14 +1,14 @@
-"""run.py - point it at an Instagram post, get a review page of commenters with a DM ready for each.
+"""run.py - point it at an Instagram post, and the commenters asking about admissions get a DM.
 
     python run.py login                  log in to Instagram once in the script's Chrome profile
-    python run.py <post or reel link>    read the comments -> pick leads and write DMs -> open the review page
-    python run.py queue                  reopen the review page
-    python run.py send [--auto]          send the DMs you approved (send.py; by hand unless --auto)
+    python run.py <post or reel link>    read the comments -> pick leads and write DMs -> send them
+    python run.py queue                  open the review page (to look, edit drafts, or skip people before a send)
+    python run.py send [--by-hand]       approve new leads and send (send.py); --by-hand: you press Send
     python run.py redraft                rewrite every unsent DM (after you change the template or prompt)
     python run.py preview                print the exact instructions Claude gets, and stop
 
-Nothing here follows anyone, and nothing is sent until you approve it on the review page; `send` is never
-part of reading a post.
+Nothing here follows anyone. Sending follows outreach.auto_approve (see send.py): with it on, every new lead
+at or above ai.min_score is sent its drafted DM. Set it to false to send only what you approve on the review page.
 """
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ CONFIG = HERE / "config.json"
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1:] == ["send", "--auto"]:
-        sys.exit(send.run(json.loads(CONFIG.read_text()), auto=True))
+    if len(sys.argv) == 3 and sys.argv[1:] == ["send", "--by-hand"]:
+        sys.exit(send.run(json.loads(CONFIG.read_text()), by_hand=True))
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     arg, cfg = sys.argv[1], json.loads(CONFIG.read_text())
@@ -50,7 +50,7 @@ def main():
     elif "instagram.com" in arg:
         comments.run(cfg, arg)
         qualify.run(cfg)
-        queue_server.serve()
+        sys.exit(send.run(cfg))
     else:
         sys.exit(__doc__)
 

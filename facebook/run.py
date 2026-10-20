@@ -1,14 +1,15 @@
-"""run.py - the whole pipeline: find posts, score and draft with Claude, review them, send the approved ones.
+"""run.py - the whole pipeline: find posts, score and draft with Claude, send the DMs.
 
     python run.py login              open the scraper's Chrome profile so you can log in to Facebook once
-    python run.py                    scrape -> qualify -> queue (the usual daily run)
+    python run.py                    scrape -> qualify -> send (the usual daily run; nothing to approve or press)
     python run.py scrape [--limit-pages N]
     python run.py qualify [--rescore | --dry-run]
-    python run.py queue              just open the review queue
-    python run.py send [--auto]      send the DMs you approved in the queue (send.py; by hand unless --auto)
+    python run.py queue              open the review queue (to look, edit drafts, or skip leads before a send)
+    python run.py send [--by-hand]   approve new leads and send (send.py); --by-hand: you press Send in each chat
     python run.py stats              counts from data/leads.json and data/contacted.csv
 
-Nothing is sent until you approve it in the review queue, and `send` is never part of the daily run.
+Sending follows outreach.auto_approve (see send.py): with it on, every new lead at or above ai.min_score is sent
+its drafted DM. Set it to false to send only what you approve in the queue.
 """
 from __future__ import annotations
 
@@ -54,7 +55,7 @@ def main():
     ap.add_argument("--limit-pages", type=int)
     ap.add_argument("--rescore", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--auto", action="store_true", help="send: press Send automatically")
+    ap.add_argument("--by-hand", action="store_true", help="send: open each chat and wait for you to press Send")
     args = ap.parse_args()
     cfg = json.loads(CONFIG.read_text())
 
@@ -69,11 +70,11 @@ def main():
     elif args.cmd == "queue":
         queue_server.serve()
     elif args.cmd == "send":
-        raise SystemExit(send.run(cfg, args.auto))
+        raise SystemExit(send.run(cfg, args.by_hand))
     else:
         scrape.run(cfg, limit_pages=args.limit_pages)
         qualify.run(cfg, args.rescore)
-        queue_server.serve()
+        raise SystemExit(send.run(cfg))
 
 
 if __name__ == "__main__":
