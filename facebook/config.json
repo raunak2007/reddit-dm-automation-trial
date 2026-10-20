@@ -47,6 +47,7 @@
 
   "outreach": {
     "auto_approve": true,
+    "auto_resolve": true,
     "sender_user_id": "",
     "daily_dm_limit": 20,
     "min_delay_seconds": 60,

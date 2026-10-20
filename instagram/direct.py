@@ -12,7 +12,8 @@ or call it with any logged-in driver:
 send_message opens the chat (ig.me/m/<username>, which lands on instagram.com/direct/t/<thread>/), checks that
 it is a chat with that person, that Instagram isn't refusing this account or them, and that the message isn't
 already in the chat; types the message, presses Send once, waits for the message box to clear, then reloads
-the chat and confirms the message is in it. It doesn't follow anyone.
+the chat and confirms the message is in it. It doesn't follow anyone: follow() does that, and send.py
+calls it before each DM (outreach.auto_follow).
 
 Returns a send_dm.Result, truthy only once the message is confirmed in the chat, with the same statuses:
     'sent', 'recipient' (Instagram says there is no such account), 'refused' (Instagram won't let this account
@@ -82,12 +83,18 @@ const IGD = (() => {
   // Same as squash() in direct.py: links and line breaks split text into pieces, so compare without spaces.
   const squash = s => (s || '').replace(/[\s​-‍﻿]+/g, '').toLowerCase();
   const label = el => (el.getAttribute('aria-label') || el.innerText || '').trim();
+  const profileButtons = re => [...(main().querySelector('header') || main()).querySelectorAll('button, [role="button"]')]
+    .filter(el => visible(el) && re.test((el.innerText || el.getAttribute('aria-label') || '').trim()));
   return {
     composer: () => [...main().querySelectorAll('[contenteditable="true"][role="textbox"]')].filter(visible),
     // Instagram's Send is a role=button whose text is "Send"; some builds label it instead.
     send: () => [...main().querySelectorAll('[role="button"], button')].filter(el => visible(el) && /^send$/i.test(label(el))),
     buttons: pattern => [...document.querySelectorAll('[role="dialog"] button, [role="dialog"] [role="button"]')]
       .filter(el => visible(el) && new RegExp(pattern, 'i').test(label(el))),
+    // A profile's Follow button, and whether it already says Following / Requested. Only in the profile
+    // header, so the "Follow" buttons under suggested accounts don't count.
+    follow: () => profileButtons(/^follow( back)?$/i),
+    following: () => profileButtons(/^(following|requested)$/i).length > 0,
     has: want => squash(text(main(), '')).includes(squash(want)),
     notice: pattern => {
       const re = new RegExp(pattern, 'i');
@@ -260,6 +267,47 @@ def verify_in_chat(driver, chat_url, text, timeout=VERIFY_TIMEOUT):
         except TimeoutException:
             if time.monotonic() >= deadline:
                 raise NotInSent(f"the message isn't in the chat after reloading it for {timeout}s") from None
+
+
+def was_sent(driver, open_url, text, username, name=""):
+    """For a held send (send.py checks these at the start of each run): True if the message is in the chat
+    after reloading it, False only if a chat with them loaded and the message still isn't in it. Raises
+    AccountBlocked if Instagram is refusing this account, RuntimeError if it can't tell (the send stays held)."""
+    driver.switch_to.default_content()
+    try:
+        verify_in_chat(driver, open_url, text)
+        return True
+    except NotInSent:
+        pass
+    if not CHAT_URL.match(driver.current_url.split("?")[0]) or not (
+            in_chat(driver, username) or (name and in_chat(driver, name))):
+        raise RuntimeError(f"the message isn't showing, but the page doesn't show a chat with @{username} either")
+    return False
+
+
+# ----------------------------------------------------------------- following (send.py, outreach.auto_follow)
+def follow(driver, username):
+    """Open @username's profile and press Follow, unless this account already follows them or has asked to.
+    Returns 'followed' (the button now says Following / Requested) or 'already'. Raises AccountBlocked if
+    Instagram is refusing this account, NoSuchUser if the profile doesn't exist, TimeoutException otherwise."""
+    driver.switch_to.default_content()
+    driver.get(f"{IG}/{username}/")
+
+    def loaded(d):
+        check_account(d)
+        said = js(d, "notice", NO_SUCH_USER)
+        if said:
+            raise NoSuchUser(f"Instagram says there is no account @{username}: {said!r}")
+        return js(d, "following") or js(d, "follow")
+
+    wait_for(driver, loaded, f"@{username}'s Follow button")
+    dismiss_dialogs(driver)
+    if js(driver, "following"):
+        return "already"
+    pause()
+    click(driver, js(driver, "follow")[0], methods=("native",))
+    wait_for(driver, lambda d: check_account(d) or js(d, "following"), "Instagram to take the follow")
+    return "followed"
 
 
 # ----------------------------------------------------------------- by hand (send.py --by-hand)

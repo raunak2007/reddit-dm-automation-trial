@@ -14,7 +14,7 @@ Rules the server enforces, not just the page:
     - outreach.daily_dm_limit DMs per day, counted from contacted.csv across every run
     - one DM per person ever: once an author is marked sent or commented, their other posts are hidden
     - an approved lead can only be unapproved (until send.py has sent it); a held one (a send that may
-      have gone out) only changes with python send.py resolve
+      have gone out) only changes once send.py checks its chat (or python send.py resolve)
     - outreach.minor_policy for authors the AI thinks are under 18:
           "comment_only" (default)  no DM; the page offers the public comment instead
           "skip"                    hidden altogether
@@ -111,8 +111,8 @@ def mark(body: dict) -> tuple[HTTPStatus, dict]:
             return HTTPStatus.BAD_REQUEST, {"error": f"{status!r} is recorded by send.py, not the queue"}
         now = status_of(lead, cfg, store.handled_posts(), store.history())
         if now == "held":
-            return HTTPStatus.CONFLICT, {"error": "a send to them may have gone out; check the chat, then run "
-                                                  f"python send.py resolve {akey} --sent or --not-sent"}
+            return HTTPStatus.CONFLICT, {"error": "a send to them may have gone out; the next send run checks the chat (or run "
+                                                  f"python send.py resolve {akey} --sent or --not-sent)"}
         if status == "unapproved" and now not in ("approved", "gave_up"):
             return HTTPStatus.CONFLICT, {"error": "only an approved lead can be unapproved"}
         if status != "unapproved" and now in ("approved", "gave_up"):

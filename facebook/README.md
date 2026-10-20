@@ -86,7 +86,7 @@ python run.py send                 # approve new leads and press Send for each
 python run.py send --by-hand       # ...or you press Enter in each chat
 python run.py stats
 python send.py --list              # what's approved and why any would be skipped
-python send.py held                # sends that couldn't be confirmed
+python send.py held                # sends that couldn't be confirmed (the next run checks them)
 python send.py resolve <author_key> --sent | --not-sent
 ```
 
@@ -116,10 +116,12 @@ For each approved lead, best score first, `send.py`:
 4. Waits for the message box to clear, reloads the chat, and records `sent` only once the message
    is in it.
 
-If the message can't be confirmed, the lead is recorded `uncertain` and **held**. Nobody held is
-messaged again until you check the chat and run `python send.py resolve <author_key> --sent` or
-`--not-sent`. A crash between pressing Send and recording the outcome leaves a `submitting` row,
-which counts as held too.
+If the message can't be confirmed, the lead is recorded `uncertain` and **held**. A crash between pressing Send and recording the outcome leaves a `submitting` row,
+which counts as held too. Nobody held is messaged again until their chat is checked, and the next run
+does that itself (`outreach.auto_resolve`, on by default): before sending anything it reloads each held
+chat; if the message is there it's recorded `sent`, if the chat loaded and it isn't, it's `cleared` and
+sent again in that run, and if the check can't tell (the chat didn't load, or doesn't show them) it
+stays held for the run after. `python send.py resolve <author_key> --sent | --not-sent` still settles one by hand.
 
 The run stops (exit code 2) on anything account-wide: logged out, wrong account, checkpoint,
 "temporarily blocked", or Messenger asking for the PIN. It also stops after 3 failures before Send in

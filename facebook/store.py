@@ -20,7 +20,8 @@ data/contacted.csv     one row per event: author_key, author, post_key, status, 
                            recipient       Facebook says the person isn't available: never retried
                            not_submitted   failed before Send was pressed: retried on a later run
                            login / rate_limited / restricted   account-wide: the run stopped there
-                           cleared         `send.py resolve <author_key> --not-sent` after you checked a held one
+                           cleared         a held send checked and found not to have gone out (send.py does
+                                           this at the start of each run, or `send.py resolve ... --not-sent`)
 
 From that history, as ledger.py does for Reddit:
     sent_today()       authors DMed (or possibly DMed) since local midnight, across every run and by hand
@@ -211,8 +212,8 @@ def skip_reason(author_key: str, max_attempts: int = MAX_ATTEMPTS, hist: dict | 
             return f"{FINAL[r['status']]} ({r['timestamp']})"
     if mine and mine[-1]["status"] in HELD:
         what = "was interrupted after Send was pressed" if mine[-1]["status"] == "submitting" else "couldn't be confirmed"
-        return (f"HELD: the last attempt ({mine[-1]['timestamp']}) {what} and may have gone out. Check the chat, "
-                f"then: python send.py resolve {author_key} --sent | --not-sent")
+        return (f"HELD: the last attempt ({mine[-1]['timestamp']}) {what} and may have gone out. The next send.py "
+                f"run checks the chat (or by hand: python send.py resolve {author_key} --sent | --not-sent)")
     tries = [r for r in mine if r["status"] in ATTEMPTS]
     if len(tries) >= max_attempts:
         refused = sum(1 for r in tries if r["status"] == "refused")
@@ -220,13 +221,14 @@ def skip_reason(author_key: str, max_attempts: int = MAX_ATTEMPTS, hist: dict | 
     return None
 
 
-def resolve(author_key: str, sent: bool) -> None:
+def resolve(author_key: str, sent: bool, how: str = "by hand") -> None:
+    """Settle a held send: 'sent', or 'cleared' (eligible again). how: who checked the chat, for the note."""
     last = held().get(author_key)
     if not last:
         raise SystemExit(f"{author_key} has no held (uncertain) send to resolve.")
     if sent:
-        record(author_key, last["author"], last["post_key"], "sent", "confirmed by hand after an uncertain attempt")
+        record(author_key, last["author"], last["post_key"], "sent", f"confirmed {how} after an uncertain attempt")
     else:
         record(author_key, last["author"], last["post_key"], "cleared",
-               "checked by hand: the uncertain attempt did not go out")
+               f"checked {how}: the uncertain attempt did not go out")
     print(f"[+] {last['author'] or author_key} recorded as {'sent' if sent else 'not sent (eligible again)'}")

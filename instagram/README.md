@@ -11,7 +11,7 @@ python run.py send                                     # send any drafted DMs th
 ```
 
 **Every new lead at or above `ai.min_score` is sent its drafted DM** (`outreach.auto_approve`, on by
-default), and **it never follows anyone.** Set `auto_approve` to `false` to send only what you approve
+default), and **each person is followed right before their DM** (`outreach.auto_follow`). Set `auto_approve` to `false` to send only what you approve
 on the review page, or use `send --by-hand` to press Enter in each chat yourself. Instagram restricts
 accounts quickly for automated DMs, so keep runs small (see Limits). Many commenters on admissions posts are teenagers, and those are
 never DMed by default.
@@ -79,7 +79,7 @@ checks for minors.
 It opens at http://127.0.0.1:8766. Each commenter shows their comment, a score and the draft DM,
 which you can edit.
 
-1. **Open profile (follow)**: opens their profile so you can click Follow (optional; nothing here follows).
+1. **Open profile (follow)**: opens their profile (optional: `send.py` follows them itself before the DM).
 2. **Approve for sending**: keeps the DM exactly as it is now; `python run.py send` sends it. It moves
    to the **Approved** tab, where **Unapprove** takes it back until it's sent.
 
@@ -98,23 +98,28 @@ Or send it yourself: **Copy DM & open chat** copies the DM and opens a chat; pas
 python run.py send            # approve new leads and press Send for each
 python run.py send --by-hand  # ...or each chat opens with the DM typed in and you press Enter
 python send.py --list         # what's approved and why any would be skipped
-python send.py held           # sends that couldn't be confirmed
+python send.py held           # sends that couldn't be confirmed (the next run checks them)
 python send.py resolve <username> --sent | --not-sent
 ```
 
 For each approved commenter, best score first, `send.py`:
 
-1. Opens `ig.me/m/<username>` and checks it landed on a chat showing their username or name, that
+1. Opens their profile and presses **Follow**, unless the account already follows them or has a
+   request pending (`outreach.auto_follow`, on by default; set it to `false` to never follow). If the
+   follow fails the DM still goes; if Instagram blocks the action, the run stops as below.
+2. Opens `ig.me/m/<username>` and checks it landed on a chat showing their username or name, that
    Instagram isn't refusing the account or them, and that the DM isn't already there (if it is,
    it's recorded as sent and not sent again).
-2. Types the approved text. Line breaks use Shift+Enter, so nothing goes out early.
-3. Writes a `submitting` row to `data/contacted.csv`, then presses Send **once**.
-4. Waits for the message box to clear, reloads the chat, and records `sent` only once the DM is in it.
+3. Types the approved text. Line breaks use Shift+Enter, so nothing goes out early.
+4. Writes a `submitting` row to `data/contacted.csv`, then presses Send **once**.
+5. Waits for the message box to clear, reloads the chat, and records `sent` only once the DM is in it.
 
-If the DM can't be confirmed, the person is recorded `uncertain` and **held**. Nobody held is
-messaged again until you check the chat and run `python send.py resolve <username> --sent` or
-`--not-sent`. A crash between pressing Send and recording the outcome leaves a `submitting` row,
-which counts as held too.
+If the DM can't be confirmed, the person is recorded `uncertain` and **held**. A crash between pressing Send and recording the outcome leaves a `submitting` row,
+which counts as held too. Nobody held is messaged again until their chat is checked, and the next run
+does that itself (`outreach.auto_resolve`, on by default): before sending anything it reloads each held
+chat; if the message is there it's recorded `sent`, if the chat loaded and it isn't, it's `cleared` and
+sent again in that run, and if the check can't tell (the chat didn't load, or doesn't show them) it
+stays held for the run after. `python send.py resolve <username> --sent | --not-sent` still settles one by hand.
 
 The run stops (exit code 2) on anything account-wide: logged out, wrong account, a challenge, an
 action block ("Try Again Later"), or a locked account. It also stops after 3 failures before Send in

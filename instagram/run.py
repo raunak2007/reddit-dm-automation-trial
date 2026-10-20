@@ -7,8 +7,9 @@
     python run.py redraft                rewrite every unsent DM (after you change the template or prompt)
     python run.py preview                print the exact instructions Claude gets, and stop
 
-Nothing here follows anyone. Sending follows outreach.auto_approve (see send.py): with it on, every new lead
-at or above ai.min_score is sent its drafted DM. Set it to false to send only what you approve on the review page.
+Sending follows outreach.auto_approve (see send.py): with it on, every new lead at or above ai.min_score is sent
+its drafted DM. Set it to false to send only what you approve on the review page. With outreach.auto_follow on,
+send.py follows each person right before their DM, and outreach.auto_resolve rechecks held sends on each run.
 """
 from __future__ import annotations
 

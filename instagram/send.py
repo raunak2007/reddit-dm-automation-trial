@@ -1,16 +1,21 @@
 """send.py - send DMs to the commenters qualify.py picked, the way run_loop.py sends the Reddit queue (run_loop.py
-and ledger.py on master): no approving, no pressing Send yourself. It never follows anyone.
+and ledger.py on master): no approving, no pressing Send, no following by hand.
 
 With outreach.auto_approve (the default), every new lead at or above ai.min_score is approved with its drafted DM
 (or your edit of it, if you edited it on the review page) at the start of each run, then sent, best score first;
 leads you skipped, unapproved or marked are left alone. Send is pressed for you. With auto_approve false, only
 commenters you clicked "Approve for sending" on are sent. --by-hand opens each chat with the message typed in and
-waits for you to press Enter in Instagram instead.
+waits for you to press Enter in Instagram instead. With outreach.auto_follow (the default), each commenter is
+followed from their profile right before their DM (skipped if this account already follows them or has asked to);
+a follow that fails is noted and the DM goes ahead.
 
 Each run: takes a lock (one run at a time), checks the browser is logged in as config.json's
 outreach.sender_user_id, then for each approved commenter opens their chat, checks it is with them and doesn't
 already hold this message, types it, sends it once, and records 'sent' only once the message is in the chat
-after reloading it. A send that can't be confirmed is recorded 'uncertain' and held until you resolve it.
+after reloading it. A send that can't be confirmed is recorded 'uncertain' and held; at the start of the next
+run (outreach.auto_resolve, on by default) each held person's chat is reloaded: if the message is in it, it is
+recorded 'sent'; if the chat loaded and the message isn't there, 'cleared', and that run sends it again; if the
+check can't tell, it stays held.
 The run stops (exit code 2) on anything account-wide (logged out, action blocked, challenge, locked) and on
 streaks of failures, refusals or uncertain sends. outreach.daily_dm_limit counts every DM sent today, from here
 or marked sent by hand, and commenters the AI thinks are under 18 are never sent to unless
@@ -19,8 +24,8 @@ outreach.minor_policy is "allow".
     python send.py                  approve new leads and press Send for each, on its own
     python send.py --by-hand        you press Send in each chat
     python send.py --list           the approved commenters and why any would be skipped (no browser)
-    python send.py held             people whose last send couldn't be confirmed
-    python send.py resolve <username> --sent | --not-sent
+    python send.py held             people whose last send couldn't be confirmed (checked on the next run)
+    python send.py resolve <username> --sent | --not-sent      settle one by hand instead
 """
 from __future__ import annotations
 
@@ -48,13 +53,13 @@ STREAKS = {
     "refused": (MAX_REFUSALS_IN_A_ROW, "different people refused in a row. Instagram doesn't say why; refusals "
                                        "across unrelated people fit a restriction on this account better than "
                                        "each one's settings, but don't prove it"),
-    "uncertain": (MAX_UNCERTAIN_IN_A_ROW, "sends in a row couldn't be confirmed in the chat. Check them "
-                                          "(python send.py held) before sending more"),
+    "uncertain": (MAX_UNCERTAIN_IN_A_ROW, "sends in a row couldn't be confirmed in the chat; the next run "
+                                          "checks them again before sending more (python send.py held)"),
 }
 NOTES = {
     "refused": "Instagram won't let this account message them, without saying why; may retry later",
     "not_submitted": "failed before Send was pressed; will retry on a later run",
-    "uncertain": "Send was pressed but the message couldn't be confirmed; HELD until you check it",
+    "uncertain": "Send was pressed but the message couldn't be confirmed; HELD until the next run checks the chat",
     "recipient": "Instagram says there is no such account; won't retry",
     "invalid": "bad entry; not sent",
 }
@@ -113,6 +118,43 @@ def prepare(driver, cfg, interactive=False):
     return me
 
 
+def resolve_held(driver):
+    """Start of a run (outreach.auto_resolve): check the chat of everyone held. Message in the chat -> 'sent';
+    the chat loaded without it -> 'cleared', so this run sends it again; anything else -> still held."""
+    leads = store.load_leads()
+    for user, row in store.held().items():
+        lead = leads.get(row["lead_key"])
+        if not lead or not lead.get("approved", {}).get("dm", "").strip():
+            print(f"[=] @{user} is held, but the approved message isn't in leads.json; check it by hand: "
+                  f"python send.py resolve {user} --sent | --not-sent")
+            continue
+        print(f"[+] checking the held send to @{user}")
+        try:
+            sent = direct.was_sent(driver, direct.chat_link(user), lead["approved"]["dm"], user,
+                                   lead.get("full_name", ""))
+        except AccountBlocked as exc:
+            print(f"    [!] stopped checking held sends ({exc.kind}): {exc}")
+            return
+        except Exception as exc:
+            print(f"    [!] couldn't tell ({type(exc).__name__}: {exc}); still held")
+            continue
+        store.resolve(user, sent, how="automatically")
+
+
+def follow_first(driver, user, cfg):
+    """outreach.auto_follow: follow them right before the DM. Returns a Result only if Instagram is refusing
+    this account (the run stops); any other failure to follow is noted and the DM goes ahead."""
+    try:
+        done = direct.follow(driver, user)
+        print(f"    {'followed' if done == 'followed' else 'already following'} @{user}")
+        browser.pause(cfg, 0.3)
+    except AccountBlocked as exc:
+        return Result(exc.kind, f"follow: {exc}")
+    except Exception as exc:
+        print(f"    [!] couldn't follow @{user} ({type(exc).__name__}: {exc}); sending the DM anyway")
+    return None
+
+
 def new_counts():
     counts = {s: 0 for s in ("sent", "recipient", "refused", "invalid", "not_submitted", "uncertain", "skipped")}
     counts.update(stopped="", halted=False)
@@ -149,11 +191,13 @@ def send_loop(driver, leads, cfg, send=direct.send_message):
             record(lead, Result("submitting", "about to press Send"))
             submitted.append(True)
 
-        try:
-            result = send(driver, direct.chat_link(user), lead["approved"]["dm"], user, lead.get("full_name", ""),
-                          before_submit=before_submit)
-        except Exception as exc:                          # a bug or a dead browser, not an Instagram answer
-            result = Result("uncertain" if submitted else "not_submitted", f"{type(exc).__name__}: {exc}")
+        result = follow_first(driver, user, cfg) if out.get("auto_follow", True) else None
+        if result is None:
+            try:
+                result = send(driver, direct.chat_link(user), lead["approved"]["dm"], user, lead.get("full_name", ""),
+                              before_submit=before_submit)
+            except Exception as exc:                      # a bug or a dead browser, not an Instagram answer
+                result = Result("uncertain" if submitted else "not_submitted", f"{type(exc).__name__}: {exc}")
         if result.status != "invalid" or submitted:       # invalid entries never reached Instagram: nothing to keep
             record(lead, result)
 
@@ -202,7 +246,10 @@ def walk_by_hand(driver, leads, cfg):
         user, text, name = lead["username"], lead["approved"]["dm"], lead.get("full_name", "")
         print(f"\n[{n}/{len(leads)}] @{user} ({done_today + 1}/{cap} today), score {lead['ai']['score']}")
         print(f"    {len(text)} chars; profile: https://www.instagram.com/{user}/")
-        said, chat_url = direct.open_for_hand(driver, direct.chat_link(user), text, user, name)
+        said = follow_first(driver, user, cfg) if out.get("auto_follow", True) else None
+        chat_url = direct.chat_link(user)
+        if said is None:
+            said, chat_url = direct.open_for_hand(driver, direct.chat_link(user), text, user, name)
         while said is None:
             print("    → The chat is open with the approved message typed in.")
             print("    → Read it, and press Enter in Instagram if you want to send it. Then come back here.")
@@ -264,21 +311,26 @@ def print_list(leads, cfg):
 
 
 def run(cfg, by_hand=False):
-    if cfg["outreach"].get("auto_approve", True):
+    out = cfg["outreach"]
+    if out.get("auto_approve", True):
         n = queue_server.auto_approve()
         print(f"[+] auto-approved {n} new commenters with their drafted DMs (outreach.auto_approve)")
     leads = approved_leads()
-    if not leads:
+    resolving = out.get("auto_resolve", True) and bool(store.held())
+    if not leads and not resolving:
         print("[+] Nothing approved to send.")
         return 0
-    print(f"[+] {len(leads)} approved commenters")
+    print(f"[+] {len(leads)} approved commenters" + (f", {len(store.held())} held to check" if resolving else ""))
     with store.lock():
-        cap = cfg["outreach"]["daily_dm_limit"]
-        if store.sent_today() >= cap:
+        cap = out["daily_dm_limit"]
+        if store.sent_today() >= cap and not resolving:
             raise SystemExit(f"Already sent {store.sent_today()}/{cap} today. Nothing to do until tomorrow.")
         driver = browser.make_driver(cfg)
         try:
             prepare(driver, cfg, interactive=by_hand)
+            if resolving:
+                resolve_held(driver)
+                leads = approved_leads()
             if not by_hand:
                 return report(send_loop(driver, leads, cfg))
             code = report(walk_by_hand(driver, leads, cfg))
@@ -306,8 +358,8 @@ def main():
         waiting = store.held()
         for user, r in waiting.items():
             print(f"@{user}  {r['status']}  {r['timestamp']}  {r['note']}")
-        print(f"{len(waiting)} held. Check each chat (https://www.instagram.com/direct/inbox/), then "
-              f"python send.py resolve <username> --sent | --not-sent" if waiting else "Nothing held.")
+        print(f"{len(waiting)} held. The next python send.py checks each chat and settles them; to settle one by "
+              f"hand: python send.py resolve <username> --sent | --not-sent" if waiting else "Nothing held.")
     elif args.cmd == "resolve":
         if not args.username or not (args.sent or args.not_sent):
             ap.error("resolve needs a username and --sent or --not-sent")

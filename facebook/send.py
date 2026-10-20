@@ -10,7 +10,10 @@ waits for you to press Enter in Messenger instead.
 Each run: takes a lock (one run at a time), checks the browser is logged in as config.json's
 outreach.sender_user_id, then for each approved lead opens their chat, checks it is with them and doesn't
 already hold this message, types it, sends it once, and records 'sent' only once the message is in the chat
-after reloading it. A send that can't be confirmed is recorded 'uncertain' and held until you resolve it.
+after reloading it. A send that can't be confirmed is recorded 'uncertain' and held; at the start of the next
+run (outreach.auto_resolve, on by default) each held lead's chat is reloaded: if the message is in it, it is
+recorded 'sent'; if the chat loaded and the message isn't there, 'cleared', and that run sends it again; if the
+check can't tell, it stays held.
 The run stops (exit code 2) on anything account-wide (logged out, blocked, checkpoint, chat PIN) and on streaks
 of failures, refusals or uncertain sends. outreach.daily_dm_limit counts every DM sent today, from here or
 marked sent by hand in the queue, and authors the AI thinks are under 18 are never sent to unless
@@ -19,8 +22,8 @@ outreach.minor_policy is "allow".
     python send.py                  approve new leads and press Send for each, on its own
     python send.py --by-hand        you press Send in each chat
     python send.py --list           the approved leads and why any would be skipped (no browser)
-    python send.py held             leads whose last send couldn't be confirmed
-    python send.py resolve <author_key> --sent | --not-sent
+    python send.py held             leads whose last send couldn't be confirmed (checked on the next run)
+    python send.py resolve <author_key> --sent | --not-sent      settle one by hand instead
 """
 from __future__ import annotations
 
@@ -49,13 +52,13 @@ STREAKS = {
     "refused": (MAX_REFUSALS_IN_A_ROW, "different people refused in a row. Facebook doesn't say why; refusals "
                                        "across unrelated people fit a restriction on this account better than "
                                        "each one's settings, but don't prove it"),
-    "uncertain": (MAX_UNCERTAIN_IN_A_ROW, "sends in a row couldn't be confirmed in the chat. Check them "
-                                          "(python send.py held) before sending more"),
+    "uncertain": (MAX_UNCERTAIN_IN_A_ROW, "sends in a row couldn't be confirmed in the chat; the next run "
+                                          "checks them again before sending more (python send.py held)"),
 }
 NOTES = {
     "refused": "Facebook won't let this account message them, without saying why; may retry later",
     "not_submitted": "failed before Send was pressed; will retry on a later run",
-    "uncertain": "Send was pressed but the message couldn't be confirmed; HELD until you check it",
+    "uncertain": "Send was pressed but the message couldn't be confirmed; HELD until the next run checks the chat",
     "recipient": "Facebook says this person isn't available; won't retry",
     "invalid": "bad entry; not sent",
 }
@@ -118,6 +121,29 @@ def prepare(driver, cfg, interactive=False):
         raise SystemExit(f"Not sending ({exc.kind}): {exc}")
     print(f"[+] sending as Facebook user {me}")
     return me
+
+
+def resolve_held(driver):
+    """Start of a run (outreach.auto_resolve): check the chat of every held lead. Message in the chat -> 'sent';
+    the chat loaded without it -> 'cleared', so this run sends it again; anything else -> still held."""
+    leads = store.load_leads()
+    for akey, row in store.held().items():
+        lead = leads.get(row["post_key"])
+        if not lead or not lead.get("approved", {}).get("dm", "").strip():
+            print(f"[=] {row['author'] or akey} is held, but its approved message isn't in leads.json; "
+                  f"check it by hand: python send.py resolve {akey} --sent | --not-sent")
+            continue
+        url, text, name = target(lead)
+        print(f"[+] checking the held send to {name}")
+        try:
+            sent = messenger.was_sent(driver, url, text, name)
+        except AccountBlocked as exc:
+            print(f"    [!] stopped checking held sends ({exc.kind}): {exc}")
+            return
+        except Exception as exc:
+            print(f"    [!] couldn't tell ({type(exc).__name__}: {exc}); still held")
+            continue
+        store.resolve(akey, sent, how="automatically")
 
 
 def new_counts():
@@ -270,21 +296,26 @@ def print_list(leads, cfg):
 
 
 def run(cfg, by_hand=False):
-    if cfg["outreach"].get("auto_approve", True):
+    out = cfg["outreach"]
+    if out.get("auto_approve", True):
         n = queue_server.auto_approve()
         print(f"[+] auto-approved {n} new leads with their drafted DMs (outreach.auto_approve)")
     leads = approved_leads()
-    if not leads:
+    resolving = out.get("auto_resolve", True) and bool(store.held())
+    if not leads and not resolving:
         print("[+] Nothing approved to send.")
         return 0
-    print(f"[+] {len(leads)} approved leads")
+    print(f"[+] {len(leads)} approved leads" + (f", {len(store.held())} held to check" if resolving else ""))
     with store.lock():
-        cap = cfg["outreach"]["daily_dm_limit"]
-        if store.sent_today() >= cap:
+        cap = out["daily_dm_limit"]
+        if store.sent_today() >= cap and not resolving:
             raise SystemExit(f"Already sent {store.sent_today()}/{cap} today. Nothing to do until tomorrow.")
         driver = browser.make_driver(cfg)
         try:
             prepare(driver, cfg, interactive=by_hand)
+            if resolving:
+                resolve_held(driver)
+                leads = approved_leads()
             if not by_hand:
                 return report(send_loop(driver, leads, cfg))
             code = report(walk_by_hand(driver, leads, cfg))
@@ -312,8 +343,8 @@ def main():
         waiting = store.held()
         for akey, r in waiting.items():
             print(f"{akey}  {r['author']}  {r['status']}  {r['timestamp']}  {r['note']}")
-        print(f"{len(waiting)} held. Check each chat ({store.messenger_url('<author_key>')}), then "
-              f"python send.py resolve <author_key> --sent | --not-sent" if waiting else "Nothing held.")
+        print(f"{len(waiting)} held. The next python send.py checks each chat and settles them; to settle one by "
+              f"hand: python send.py resolve <author_key> --sent | --not-sent" if waiting else "Nothing held.")
     elif args.cmd == "resolve":
         if not args.author_key or not (args.sent or args.not_sent):
             ap.error("resolve needs an author_key and --sent or --not-sent")

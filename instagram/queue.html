@@ -64,7 +64,7 @@ const SENDING = new Set(["approved", "held", "gave_up"]);
 const LABEL = { sent: "DMed", skipped: "Skipped", not_relevant: "Marked not relevant",
                 already_contacted: "Already DMed from another post", low: "Below the score cutoff",
                 approved: "Approved: python run.py send will send this DM", unapproved: "Back in To send",
-                held: "HELD: a send may have gone out. Check the chat, then run python send.py resolve",
+                held: "HELD: a send may have gone out. The next send run checks the chat and settles it",
                 gave_up: "Not sent: gave up after repeated failed attempts",
                 recipient: "Instagram says there is no such account" };
 let data = { leads: [] }, tab = "todo";
@@ -132,7 +132,7 @@ document.addEventListener("click", async e => {
   const b = e.target.closest("[data-act]");
   if (!b) return;
   const l = lead(b), act = b.dataset.act;
-  if (act === "profile") { window.open(l.profile_url, "_blank", "noopener"); return toast("Click Follow on their profile."); }
+  if (act === "profile") { window.open(l.profile_url, "_blank", "noopener"); return toast("send.py follows them before the DM (outreach.auto_follow)."); }
   if (act === "chat") {
     await copy(draft(b));
     window.open(l.chat_url, "_blank", "noopener");

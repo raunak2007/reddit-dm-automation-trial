@@ -71,7 +71,7 @@ const LABEL = { sent: "DM sent", commented: "Commented", skipped: "Skipped", not
                 already_contacted: "Already contacted via another post", low: "Below the score cutoff",
                 approved: "Approved: python run.py send will send this message",
                 unapproved: "Back in To review",
-                held: "HELD: a send may have gone out. Check the chat, then run python send.py resolve",
+                held: "HELD: a send may have gone out. The next send run checks the chat and settles it",
                 gave_up: "Not sent: gave up after repeated failed attempts",
                 recipient: "Facebook says this person isn't available" };
 const tabHas = (k, l) => k === "all" || (k === "done" ? DONE.has(l.status) : k === "approved" ? SENDING.has(l.status) : l.status === k);

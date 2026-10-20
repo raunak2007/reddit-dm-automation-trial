@@ -2,7 +2,7 @@
 
     python queue_server.py [--port 8766] [--no-open]
 
-For each lead, "Open profile" to follow them, then either:
+For each lead (send.py follows them itself before the DM, with outreach.auto_follow), either:
     "Approve for sending"    keeps the DM exactly as it is now; python send.py sends it (see send.py)
     "Copy DM & open chat"    copies the (edited) message and opens a chat with them; paste, send, "Mark sent"
 What you click goes to data/contacted.csv straight away.
@@ -10,8 +10,8 @@ What you click goes to data/contacted.csv straight away.
 The server enforces outreach.daily_dm_limit (counted across every run), one DM per person ever (across
 all posts), and outreach.minor_policy for commenters who seem to be under 18: "skip" (default) hides
 them, "allow" treats them like anyone else. An approved lead can only be unapproved (until send.py has sent
-it); a held one (a send that may have gone out) only changes with python send.py resolve. It only listens
-on 127.0.0.1.
+it); a held one (a send that may have gone out) only changes once send.py checks its chat (or python send.py
+resolve). It only listens on 127.0.0.1.
 """
 from __future__ import annotations
 
@@ -98,8 +98,8 @@ def mark(body: dict) -> tuple[HTTPStatus, dict]:
         user = lead["username"].lower()
         now = status_of(lead, cfg, store.handled(), store.history())
         if now == "held":
-            return HTTPStatus.CONFLICT, {"error": "a send to them may have gone out; check the chat, then run "
-                                                  f"python send.py resolve {user} --sent or --not-sent"}
+            return HTTPStatus.CONFLICT, {"error": "a send to them may have gone out; the next send run checks the chat (or run "
+                                                  f"python send.py resolve {user} --sent or --not-sent)"}
         if status == "unapproved" and now not in ("approved", "gave_up"):
             return HTTPStatus.CONFLICT, {"error": "only an approved lead can be unapproved"}
         if status != "unapproved" and now in ("approved", "gave_up"):

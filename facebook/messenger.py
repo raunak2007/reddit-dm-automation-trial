@@ -243,6 +243,21 @@ def verify_in_chat(driver, chat_url, text, timeout=VERIFY_TIMEOUT):
                 raise NotInSent(f"the message isn't in the chat after reloading it for {timeout}s") from None
 
 
+def was_sent(driver, chat_url, text, name):
+    """For a held send (send.py checks these at the start of each run): True if the message is in the chat
+    after reloading it, False only if the chat with `name` loaded and the message still isn't in it. Raises
+    AccountBlocked if Facebook is refusing this account, RuntimeError if it can't tell (the send stays held)."""
+    driver.switch_to.default_content()
+    try:
+        verify_in_chat(driver, chat_url, text)
+        return True
+    except NotInSent:
+        pass
+    if not CHAT_URL.match(driver.current_url.split("?")[0]) or not in_chat(driver, name):
+        raise RuntimeError(f"the message isn't showing, but the page doesn't show a chat with {name!r} either")
+    return False
+
+
 # ----------------------------------------------------------------- by hand (send.py --by-hand)
 def open_for_hand(driver, chat_url, text, name):
     """Open the chat and type the message in, leaving Send to you. A Result if Facebook refuses first or the

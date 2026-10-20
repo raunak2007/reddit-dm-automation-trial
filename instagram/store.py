@@ -20,7 +20,8 @@ data/contacted.csv   one row per event: username, lead_key, status, timestamp, n
                          recipient      Instagram says there is no such account: never retried
                          not_submitted  failed before Send was pressed: retried on a later run
                          login / rate_limited / restricted   account-wide: the run stopped there
-                         cleared        `send.py resolve <username> --not-sent` after you checked a held one
+                         cleared        a held send checked and found not to have gone out (send.py does this
+                                        at the start of each run, or `send.py resolve ... --not-sent`)
 
 From that history, as ledger.py does for Reddit:
     sent_today()       people DMed (or possibly DMed) since local midnight, across every run and by hand
@@ -159,8 +160,8 @@ def skip_reason(username: str, max_attempts: int = MAX_ATTEMPTS, hist: dict | No
             return f"{FINAL[r['status']]} ({r['timestamp']})"
     if mine and mine[-1]["status"] in HELD:
         what = "was interrupted after Send was pressed" if mine[-1]["status"] == "submitting" else "couldn't be confirmed"
-        return (f"HELD: the last attempt ({mine[-1]['timestamp']}) {what} and may have gone out. Check the chat, "
-                f"then: python send.py resolve {username.lower()} --sent | --not-sent")
+        return (f"HELD: the last attempt ({mine[-1]['timestamp']}) {what} and may have gone out. The next send.py "
+                f"run checks the chat (or by hand: python send.py resolve {username.lower()} --sent | --not-sent)")
     tries = [r for r in mine if r["status"] in ATTEMPTS]
     if len(tries) >= max_attempts:
         refused = sum(1 for r in tries if r["status"] == "refused")
@@ -168,13 +169,14 @@ def skip_reason(username: str, max_attempts: int = MAX_ATTEMPTS, hist: dict | No
     return None
 
 
-def resolve(username: str, sent: bool) -> None:
+def resolve(username: str, sent: bool, how: str = "by hand") -> None:
+    """Settle a held send: 'sent', or 'cleared' (eligible again). how: who checked the chat, for the note."""
     username = username.lower().removeprefix("@")
     last = held().get(username)
     if not last:
         raise SystemExit(f"@{username} has no held (uncertain) send to resolve.")
     if sent:
-        record(username, last["lead_key"], "sent", "confirmed by hand after an uncertain attempt")
+        record(username, last["lead_key"], "sent", f"confirmed {how} after an uncertain attempt")
     else:
-        record(username, last["lead_key"], "cleared", "checked by hand: the uncertain attempt did not go out")
+        record(username, last["lead_key"], "cleared", f"checked {how}: the uncertain attempt did not go out")
     print(f"[+] @{username} recorded as {'sent' if sent else 'not sent (eligible again)'}")
