@@ -25,3 +25,12 @@ pip install undetected-chromedriver selenium python-dotenv
 # 4. Optional: confirm the Chrome version the scripts will use
 python chrome_version.py
 ```
+
+## Facebook lead finder (`facebook/`)
+
+`facebook/` finds recent Facebook posts from students and parents who need admissions help. Claude scores
+each post and drafts a message, you approve drafts in a local review queue, and `facebook/send.py`
+sends the approved ones through Messenger. It follows the same rules as the Reddit scripts here: sender
+check, one send per person, confirmation after sending, held uncertain sends, a daily cap, and stops on
+account-wide problems. It shares this folder's `chrome_version.py` and `send_dm.py` helpers. Setup and
+use: [facebook/README.md](facebook/README.md).

@@ -64,10 +64,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 <main id="list"><p class="empty">Loading…</p></main>
 <div id="toast" role="status"></div>
 <script>
-const TABS = [["todo", "To review"], ["done", "Done"], ["low", "Low score"], ["all", "All"]];
-const DONE = new Set(["sent", "commented", "skipped", "not_relevant", "already_contacted"]);
+const TABS = [["todo", "To review"], ["approved", "Approved"], ["done", "Done"], ["low", "Low score"], ["all", "All"]];
+const DONE = new Set(["sent", "commented", "skipped", "not_relevant", "already_contacted", "recipient"]);
+const SENDING = new Set(["approved", "held", "gave_up"]);
 const LABEL = { sent: "DM sent", commented: "Commented", skipped: "Skipped", not_relevant: "Marked not relevant",
-                already_contacted: "Already contacted via another post", low: "Below the score cutoff" };
+                already_contacted: "Already contacted via another post", low: "Below the score cutoff",
+                approved: "Approved: python run.py send will send this message",
+                unapproved: "Back in To review",
+                held: "HELD: a send may have gone out. Check the chat, then run python send.py resolve",
+                gave_up: "Not sent: gave up after repeated failed attempts",
+                recipient: "Facebook says this person isn't available" };
+const tabHas = (k, l) => k === "all" || (k === "done" ? DONE.has(l.status) : k === "approved" ? SENDING.has(l.status) : l.status === k);
 let data = { leads: [] }, tab = "todo";
 try { tab = localStorage.getItem("tab") || "todo"; } catch (e) {}
 
@@ -87,13 +94,9 @@ async function api(path, body) {
 }
 async function load() { data = await api("/api/state"); render(); }
 
-function visible(l) {
-  if (tab === "all") return true;
-  if (tab === "done") return DONE.has(l.status);
-  return l.status === tab;
-}
+const visible = l => tabHas(tab, l);
 function renderTabs() {
-  const n = k => k === "all" ? data.leads.length : data.leads.filter(l => k === "done" ? DONE.has(l.status) : l.status === k).length;
+  const n = k => data.leads.filter(l => tabHas(k, l)).length;
   $("#tabs").innerHTML = TABS.map(([k, t]) => `<button data-tab="${k}" aria-pressed="${tab === k}">${t} (${n(k)})</button>`).join("");
 }
 function card(l) {
@@ -111,12 +114,15 @@ function card(l) {
     ${minor ? `<div class="warn">Looks like the author may be under 18 (${esc(a.minor_evidence)}). ${l.dm_allowed ? "" : "DMs are off for this lead; use the public comment, or skip."}</div>` : ""}
     ${!l.author_key ? `<div class="warn">Couldn't read this author's profile link. Open the post and message them from there.</div>` : ""}
     ${done ? `<div class="status">${esc(LABEL[l.status] || l.status)}</div>` : ""}
+    ${l.why ? `<div class="sub">${esc(l.why)}</div>` : ""}
     ${l.dm_allowed ? `<label>Private message <span class="count" data-count="dm"></span></label>
     <textarea data-field="dm" ${done ? "readonly" : ""}>${esc(l.dm)}</textarea>` : ""}
     <label>Public comment <span class="count" data-count="comment"></span></label>
     <textarea class="c" data-field="comment" ${done ? "readonly" : ""}>${esc(l.comment)}</textarea>
+    ${["approved", "gave_up"].includes(l.status) ? `<div class="actions"><button data-act="unapproved">Unapprove</button></div>` : ""}
     ${done ? "" : `<div class="actions">
-      ${l.dm_allowed ? `<button class="primary" data-act="messenger" ${capHit || !l.messenger_url ? "disabled" : ""} title="${capHit ? "Daily DM limit reached" : ""}">Copy &amp; open Messenger</button>
+      ${l.dm_allowed ? `<button class="primary" data-act="approved" ${!l.messenger_url ? "disabled" : ""} title="send.py sends exactly this text">Approve for sending</button>
+      <button data-act="messenger" ${capHit || !l.messenger_url ? "disabled" : ""} title="${capHit ? "Daily DM limit reached" : ""}">Copy &amp; open Messenger</button>
       <button class="ok" data-act="sent" ${capHit ? "disabled" : ""}>Mark sent</button>` : ""}
       ${l.post_url ? `<button data-act="comment">Copy comment &amp; open post</button>
       <button class="ok" data-act="commented">Mark commented</button>` : ""}
@@ -130,7 +136,8 @@ function render() {
   renderTabs();
   const items = data.leads.filter(visible);
   $("#list").innerHTML = items.length ? items.map(card).join("")
-    : `<p class="empty">${tab === "todo" ? "Nothing left to review. Run the scraper again later for new posts." : "Nothing here."}</p>`;
+    : `<p class="empty">${tab === "todo" ? "Nothing left to review. Run the scraper again later for new posts."
+        : tab === "approved" ? "Nothing approved. Approve DMs in To review, then run python run.py send." : "Nothing here."}</p>`;
   document.querySelectorAll("textarea").forEach(counter);
 }
 function counter(ta) {
@@ -165,7 +172,7 @@ document.addEventListener("click", async e => {
   if (act === "sent" && !confirm(`Did you send the message to ${l.author}?`)) return;
   b.disabled = true;
   try {
-    const message = act === "sent" ? field(b, "dm") : act === "commented" ? field(b, "comment") : "";
+    const message = ["sent", "approved"].includes(act) ? field(b, "dm") : act === "commented" ? field(b, "comment") : "";
     await api("/api/mark", { post_key: l.post_key, status: act, message });
     await load();
     toast(LABEL[act] || "Saved");

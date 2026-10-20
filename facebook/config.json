@@ -46,7 +46,11 @@
   },
 
   "outreach": {
+    "sender_user_id": "",
     "daily_dm_limit": 20,
+    "min_delay_seconds": 60,
+    "max_delay_seconds": 180,
+    "max_attempts_per_recipient": 3,
     "minor_policy": "comment_only",
     "queue_port": 8765
   },

@@ -2,18 +2,41 @@
 
 Finds recent Facebook posts from students and parents who need help with college admissions,
 essays, scholarships, financial aid or internships. Claude scores each post and drafts a
-personalized message pointing them to your booking link. You review each one in a local queue
-and send it yourself.
+personalized message pointing them to your booking link. You review each one in a local queue,
+approve the ones worth sending, and `send.py` sends them the way the Reddit scripts on `master`
+send theirs.
 
 ```
-scrape.py ──► data/leads.json ──► qualify.py (Claude) ──► queue_server.py ──► you send in Messenger
- (your logged-in            (score, flags,            (review, edit,         data/contacted.csv
-  Facebook session)          DM + comment drafts)      copy & open chat)      (who's been contacted)
+scrape.py ──► data/leads.json ──► qualify.py (Claude) ──► queue_server.py ──► send.py ──► Messenger
+ (your logged-in            (score, flags,            (review, edit,      (by hand, or     data/contacted.csv
+  Facebook session)          DM + comment drafts)      approve)            --auto)          (who's been contacted)
 ```
 
-**Nothing here sends a message automatically.** Facebook restricts accounts that send automated
-messages to people they aren't friends with, and many people posting about admissions are under
-18. So the scripts find, score and draft, and you press send. That takes about 10 seconds per lead.
+**Nothing is sent that you haven't approved**, with the exact text you approved. By default
+`send.py` only opens each chat with the message typed in and you press Enter. With `--auto` it
+presses Send itself. Facebook restricts accounts that send automated messages to people they
+aren't friends with, so keep `--auto` runs small (see Guardrails). Many people posting about
+admissions are under 18, and those authors are never DMed by default.
+
+## How this fits with the Reddit scripts
+
+`send.py`, `messenger.py` and `store.py` are the Facebook versions of `run_loop.py` / `open_queue.py`,
+`send_dm.py` and `ledger.py` on `master`, with the same rules:
+
+| Reddit (repo root) | Facebook (this folder) |
+|---|---|
+| queue `.html` you curate | leads you **Approve for sending** in the review queue |
+| `open_queue.py` (you click Send) / `--send` | `send.py` (you press Enter) / `--auto` |
+| `sender_username`, checked via `/api/me` | `outreach.sender_user_id`, checked via the `c_user` cookie |
+| confirmed in the sent folder | confirmed in the chat after reloading it |
+| `contacted.csv`: `submitting`, `uncertain` = held | `data/contacted.csv`: the same statuses |
+| `python ledger.py held` / `resolve` | `python send.py held` / `resolve` |
+
+The waits, clicks, typing, failed-step screenshots and `Result` statuses come straight from the root
+`send_dm.py`, and Chrome's version from the root `chrome_version.py` (`browser.py` puts the repo
+root on the import path). Reddit has a sent folder to import; Messenger doesn't. Outside sends are
+caught when `send.py` opens a chat that already has the same message in it, and by your
+**Mark sent** clicks.
 
 ## Setup
 
@@ -25,7 +48,11 @@ python3.11 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # then put your ANTHROPIC_API_KEY in it
 python run.py login         # opens Chrome: log in to Facebook once; the session is saved
+python run.py send          # the first time, says which account is logged in: put that id in
+                            # config.json's outreach.sender_user_id
 ```
+
+If Messenger asks for your chat PIN (end-to-end encrypted chats), enter it in that Chrome window once.
 
 To use your everyday Chrome profile instead of a separate one, set `browser.user_data_dir` in
 `config.json` (on a Mac: `~/Library/Application Support/Google/Chrome`) and quit Chrome before
@@ -54,13 +81,19 @@ run `python run.py qualify --rescore` to redraft every lead.
 python run.py                      # scrape -> score/draft -> open the review queue
 python run.py scrape --limit-pages 1   # quick test on one search page
 python run.py queue                # reopen the queue without scraping
+python run.py send                 # send what you approved: you press Enter in each chat
+python run.py send --auto          # ...or let it press Send
 python run.py stats
+python send.py --list              # what's approved and why any would be skipped
+python send.py held                # sends that couldn't be confirmed
+python send.py resolve <author_key> --sent | --not-sent
 ```
 
 In the queue (http://127.0.0.1:8765):
 
 | Button | What it does |
 |---|---|
+| **Approve for sending** | Keeps the draft exactly as it is now. `python run.py send` sends it. It moves to the **Approved** tab, where **Unapprove** takes it back until it's sent. |
 | **Copy & open Messenger** | Copies your edited draft and opens a chat with the author. Paste it, read it once more, send. |
 | **Mark sent** | Records the DM. That person is never offered again, even from other posts. |
 | **Copy comment & open post** / **Mark commented** | Use a helpful public reply instead of a DM. |
@@ -68,11 +101,36 @@ In the queue (http://127.0.0.1:8765):
 
 Edits to drafts save automatically. Leads are sorted by score.
 
+## Sending
+
+For each approved lead, best score first, `send.py`:
+
+1. Opens their chat and checks it shows their name, that Facebook isn't refusing the account or the
+   person, and that the message isn't already there (if it is, it's recorded as sent and not sent again).
+2. Types the approved text. Line breaks use Shift+Enter, so nothing goes out early.
+3. Writes a `submitting` row to `data/contacted.csv`, then presses Send **once**.
+4. Waits for the message box to clear, reloads the chat, and records `sent` only once the message
+   is in it.
+
+If the message can't be confirmed, the lead is recorded `uncertain` and **held**. Nobody held is
+messaged again until you check the chat and run `python send.py resolve <author_key> --sent` or
+`--not-sent`. A crash between pressing Send and recording the outcome leaves a `submitting` row,
+which counts as held too.
+
+The run stops (exit code 2) on anything account-wide: logged out, wrong account, checkpoint,
+"temporarily blocked", or Messenger asking for the PIN. It also stops after 3 failures before Send in
+a row, 3 refusals from different people in a row, or 2 unconfirmed sends in a row. Someone refused or
+failed is retried on later runs, up to `outreach.max_attempts_per_recipient` (3). It waits
+`outreach.min_delay_seconds` to `max_delay_seconds` (60–180 s) between sends, and only one `send.py`
+runs at a time. Don't scrape while it runs: they share the Chrome profile.
+
 ## Guardrails
 
-- **Daily DM cap** (`outreach.daily_dm_limit`, default 20). The queue server enforces it, counting
-  across every run. New or low-activity accounts should start around 10.
-- **One DM per person, ever.**
+- **Daily DM cap** (`outreach.daily_dm_limit`, default 20), counted across every run from
+  `data/contacted.csv`: `send.py` sends, **Mark sent** clicks, and held sends from today. Both the queue
+  server and `send.py` enforce it. New or low-activity accounts should start around 10, especially
+  with `--auto`.
+- **One DM per person, ever.** That includes held sends: their other posts aren't offered.
 - **Minors** (`outreach.minor_policy`): if the AI thinks the author is under 18, the default
   `comment_only` turns off the DM and offers only the public comment. Set it to `skip` to hide
   those leads. A parent posting about their child is not flagged.
