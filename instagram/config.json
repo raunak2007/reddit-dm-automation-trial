@@ -1,0 +1,42 @@
+{
+  "business": {
+    "name": "Aristo Scholars",
+    "website": "https://your-website.com",
+    "booking_link": "https://your-website.com/book",
+    "sender_first_name": "Raunak",
+    "services": [
+      "1:1 college admissions counseling",
+      "college essay coaching",
+      "scholarship and financial aid help",
+      "internship and summer program search"
+    ],
+    "offer": "a free call"
+  },
+
+  "message_template": "hey {first_name}! saw your comment about {topic} - we're Aristo Scholars, we help students with college apps, essays and scholarships. happy to hop on a free call and give you some pointers if that'd help: {booking_link}",
+
+  "ai": {
+    "enabled": true,
+    "model": "claude-sonnet-5-5",
+    "min_score": 50
+  },
+
+  "instagram": {
+    "my_username": "",
+    "max_comments": 500,
+    "include_replies": true
+  },
+
+  "outreach": {
+    "daily_dm_limit": 20,
+    "minor_policy": "skip",
+    "queue_port": 8766
+  },
+
+  "browser": {
+    "profile": "instagram_1",
+    "user_data_dir": "",
+    "min_page_delay_seconds": 3,
+    "max_page_delay_seconds": 7
+  }
+}
