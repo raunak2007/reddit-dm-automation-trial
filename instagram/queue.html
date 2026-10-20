@@ -58,10 +58,15 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 <main id="list"><p class="empty">Loading…</p></main>
 <div id="toast" role="status"></div>
 <script>
-const TABS = [["todo", "To send"], ["done", "Done"], ["low", "Not leads"], ["all", "All"]];
-const DONE = new Set(["sent", "skipped", "not_relevant", "already_contacted"]);
-const LABEL = { sent: "Followed & DMed", skipped: "Skipped", not_relevant: "Marked not relevant",
-                already_contacted: "Already DMed from another post", low: "Below the score cutoff" };
+const TABS = [["todo", "To send"], ["approved", "Approved"], ["done", "Done"], ["low", "Not leads"], ["all", "All"]];
+const DONE = new Set(["sent", "skipped", "not_relevant", "already_contacted", "recipient"]);
+const SENDING = new Set(["approved", "held", "gave_up"]);
+const LABEL = { sent: "DMed", skipped: "Skipped", not_relevant: "Marked not relevant",
+                already_contacted: "Already DMed from another post", low: "Below the score cutoff",
+                approved: "Approved: python run.py send will send this DM", unapproved: "Back in To send",
+                held: "HELD: a send may have gone out. Check the chat, then run python send.py resolve",
+                gave_up: "Not sent: gave up after repeated failed attempts",
+                recipient: "Instagram says there is no such account" };
 let data = { leads: [] }, tab = "todo";
 try { tab = localStorage.getItem("ig-tab") || "todo"; } catch (e) {}
 
@@ -75,7 +80,7 @@ async function api(path, body) {
   return j;
 }
 async function load() { data = await api("/api/state"); render(); }
-const inTab = (l, k) => k === "all" || (k === "done" ? DONE.has(l.status) : l.status === k);
+const inTab = (l, k) => k === "all" || (k === "done" ? DONE.has(l.status) : k === "approved" ? SENDING.has(l.status) : l.status === k);
 
 function card(l) {
   const a = l.ai, done = l.status !== "todo", capHit = data.sent_today >= data.cap;
@@ -90,10 +95,16 @@ function card(l) {
     ${a.likely_minor ? `<div class="warn">May be under 18: ${esc(a.minor_evidence)}</div>` : ""}
     ${l.is_private ? `<div class="warn">Private account: your DM goes to their message requests until they follow back.</div>` : ""}
     ${done ? `<div class="status">${esc(LABEL[l.status] || l.status)}</div>` : ""}
+    ${l.why ? `<div class="sub">${esc(l.why)}</div>` : ""}
     <textarea data-field="dm" ${done ? "readonly" : ""}>${esc(l.dm)}</textarea>
+    ${["approved", "gave_up"].includes(l.status) ? `<div class="actions">
+      <button data-act="profile">Open profile (follow)</button>
+      <button data-act="unapproved">Unapprove</button>
+    </div>` : ""}
     ${done ? "" : `<div class="actions">
       <button data-act="profile">Open profile (follow)</button>
-      <button class="primary" data-act="chat" ${capHit ? "disabled" : ""}>Copy DM &amp; open chat</button>
+      <button class="primary" data-act="approved" title="send.py sends exactly this text">Approve for sending</button>
+      <button data-act="chat" ${capHit ? "disabled" : ""}>Copy DM &amp; open chat</button>
       <button class="ok" data-act="sent" ${capHit ? "disabled" : ""}>Mark sent</button>
       <button data-act="skipped">Skip</button>
       <button data-act="not_relevant">Not a lead</button>
@@ -105,7 +116,8 @@ function render() {
   $("#tabs").innerHTML = TABS.map(([k, t]) => `<button data-tab="${k}" aria-pressed="${tab === k}">${t} (${data.leads.filter(l => inTab(l, k)).length})</button>`).join("");
   const items = data.leads.filter(l => inTab(l, tab));
   $("#list").innerHTML = items.length ? items.map(card).join("")
-    : `<p class="empty">${tab === "todo" ? "All done. Run it on another post for more." : "Nothing here."}</p>`;
+    : `<p class="empty">${tab === "todo" ? "All done. Run it on another post for more."
+        : tab === "approved" ? "Nothing approved. Approve DMs in To send, then run python run.py send." : "Nothing here."}</p>`;
 }
 const lead = el => data.leads.find(l => l.key === el.closest(".card").dataset.key);
 const draft = el => el.closest(".card").querySelector("textarea").value;
@@ -126,10 +138,10 @@ document.addEventListener("click", async e => {
     window.open(l.chat_url, "_blank", "noopener");
     return toast("DM copied. Paste it in the chat, send, then click Mark sent.");
   }
-  if (act === "sent" && !confirm(`Did you follow and DM @${l.username}?`)) return;
+  if (act === "sent" && !confirm(`Did you DM @${l.username}?`)) return;
   b.disabled = true;
   try {
-    await api("/api/mark", { key: l.key, status: act, message: act === "sent" ? draft(b) : "" });
+    await api("/api/mark", { key: l.key, status: act, message: ["sent", "approved"].includes(act) ? draft(b) : "" });
     await load();
     toast(LABEL[act] || "Saved");
   } catch (err) { b.disabled = false; toast(err.message); }

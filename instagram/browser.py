@@ -1,9 +1,12 @@
-"""browser.py - open Chrome with the Instagram session the comment reader uses.
+"""browser.py - open Chrome with the Instagram session the comment reader and send.py use.
 
 By default each profile lives in accounts/<profile>/chrome_profile and you log in to Instagram in it once
 (python run.py login). To read with the Chrome profile you already use day to day instead, set
 config.json's browser.user_data_dir (e.g. "~/Library/Application Support/Google/Chrome") and quit
 Chrome first: Chrome won't let two processes share a profile.
+
+Importing it also puts the repo root on sys.path, so the instagram scripts share the Reddit scripts'
+chrome_version.py and send_dm.py's page helpers instead of keeping copies.
 """
 from __future__ import annotations
 
@@ -12,10 +15,12 @@ import sys
 import time
 from pathlib import Path
 
-import undetected_chromedriver as uc
-from chrome_version import chrome_major
-
 HERE = Path(__file__).resolve().parent
+sys.path.insert(1, str(HERE.parent))             # after this folder, so its own modules still come first
+
+import undetected_chromedriver as uc              # noqa: E402
+from chrome_version import chrome_major           # noqa: E402
+
 LOGGED_OUT = ("log in to instagram", "sign up for instagram", "forgot password?", "phone number, username, or email")
 
 
