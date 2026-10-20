@@ -1,8 +1,8 @@
 {
   "business": {
     "name": "Aristo Scholars",
-    "website": "https://your-website.com",
-    "booking_link": "https://your-website.com/book",
+    "website": "https://aristoscholars.com",
+    "booking_link": "https://aristoscholars.com/#get-started",
     "sender_first_name": "Raunak",
     "services": [
       "1:1 college admissions counseling",
@@ -22,7 +22,7 @@
   },
 
   "instagram": {
-    "my_username": "",
+    "my_username": "ameer.husss",
     "max_comments": 500,
     "include_replies": true
   },
