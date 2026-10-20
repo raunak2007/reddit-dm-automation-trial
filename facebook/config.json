@@ -1,0 +1,64 @@
+{
+  "business": {
+    "name": "Aristo Scholars",
+    "website": "https://aristoscholars.com",
+    "booking_link": "https://aristoscholars.com/#get-started",
+    "sender_first_name": "Ameer",
+    "services": [
+      "1:1 college admissions counseling (school list, strategy, timelines)",
+      "Common App / supplemental essay coaching",
+      "Scholarship and financial aid search and applications",
+      "Internship and summer program search, resumes and outreach",
+      "Transfer and graduate school applications"
+    ],
+    "offer": "a free 20-minute call to look at their situation and give a few concrete next steps"
+  },
+
+  "search": {
+    "lookback_days": 14,
+    "keywords": [
+      "college counselor",
+      "college admissions help",
+      "need help with college applications",
+      "common app essay help",
+      "college essay help",
+      "worried about college admissions",
+      "scholarship help",
+      "how to find scholarships",
+      "financial aid help college",
+      "how to get an internship",
+      "internship help",
+      "summer internship high school",
+      "transfer application help",
+      "early decision advice"
+    ],
+    "groups": [],
+    "search_inside_groups": true,
+    "max_scrolls_per_page": 25,
+    "stop_after_old_posts": 8,
+    "keep_undated_posts": true
+  },
+
+  "ai": {
+    "model": "claude-sonnet-5-5",
+    "min_score": 60,
+    "max_posts_per_run": 300
+  },
+
+  "outreach": {
+    "sender_user_id": "",
+    "daily_dm_limit": 20,
+    "min_delay_seconds": 60,
+    "max_delay_seconds": 180,
+    "max_attempts_per_recipient": 3,
+    "minor_policy": "comment_only",
+    "queue_port": 8765
+  },
+
+  "browser": {
+    "profile": "facebook_1",
+    "user_data_dir": "",
+    "min_page_delay_seconds": 4,
+    "max_page_delay_seconds": 9
+  }
+}

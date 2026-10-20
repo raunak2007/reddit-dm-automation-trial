@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lead Review Queue</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #fff; --text: #1c1e21; --muted: #65676b; --line: #dfe1e5;
+  --accent: #1b74e4; --accent-text: #fff; --good: #1e8e3e; --warn: #b26a00; --warn-bg: #fff4e0;
+  --bad: #c5221f; --chip: #eef1f5; --quote: #f2f4f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #18191a; --card: #242526; --text: #e4e6eb; --muted: #b0b3b8; --line: #3a3b3c;
+    --accent: #2d88ff; --accent-text: #fff; --good: #5cc26f; --warn: #f0b04a; --warn-bg: #3a2e17;
+    --bad: #f28b82; --chip: #3a3b3c; --quote: #1f2021;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 1px solid var(--line); padding: 12px 16px; }
+.bar { max-width: 860px; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+h1 { font-size: 18px; margin: 0; margin-right: auto; }
+.meter { font-variant-numeric: tabular-nums; color: var(--muted); }
+.meter b { color: var(--text); }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tabs button { border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 999px; padding: 4px 12px; cursor: pointer; font: inherit; }
+.tabs button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+main { max-width: 860px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.who { font-weight: 600; }
+.who a { color: inherit; }
+.sub { color: var(--muted); font-size: 13px; }
+.score { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+.chip { background: var(--chip); border-radius: 4px; padding: 1px 7px; font-size: 12px; }
+.need { margin: 6px 0; }
+blockquote { margin: 8px 0; padding: 8px 12px; background: var(--quote); border-radius: 6px; white-space: pre-wrap; max-height: 9.5em; overflow: auto; font-size: 14px; }
+.warn { background: var(--warn-bg); color: var(--warn); border-radius: 6px; padding: 8px 10px; font-size: 13px; margin: 8px 0; }
+label { display: block; font-size: 12px; color: var(--muted); margin-top: 10px; }
+textarea { width: 100%; min-height: 110px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+textarea.c { min-height: 70px; }
+.count { float: right; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.actions button, .actions a { font: inherit; font-size: 14px; border-radius: 6px; padding: 6px 12px; cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--text); text-decoration: none; }
+.actions .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.actions .ok { border-color: var(--good); color: var(--good); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.done { opacity: .65; }
+.status { font-size: 13px; font-weight: 600; }
+.empty { text-align: center; color: var(--muted); padding: 40px 0; }
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 6px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: calc(100% - 32px); }
+#toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <h1>Lead review queue</h1>
+  <span class="meter">DMs today <b id="sent">0</b> / <b id="cap">0</b></span>
+  <div class="tabs" id="tabs"></div>
+</div></header>
+<main id="list"><p class="empty">Loading…</p></main>
+<div id="toast" role="status"></div>
+<script>
+const TABS = [["todo", "To review"], ["approved", "Approved"], ["done", "Done"], ["low", "Low score"], ["all", "All"]];
+const DONE = new Set(["sent", "commented", "skipped", "not_relevant", "already_contacted", "recipient"]);
+const SENDING = new Set(["approved", "held", "gave_up"]);
+const LABEL = { sent: "DM sent", commented: "Commented", skipped: "Skipped", not_relevant: "Marked not relevant",
+                already_contacted: "Already contacted via another post", low: "Below the score cutoff",
+                approved: "Approved: python run.py send will send this message",
+                unapproved: "Back in To review",
+                held: "HELD: a send may have gone out. Check the chat, then run python send.py resolve",
+                gave_up: "Not sent: gave up after repeated failed attempts",
+                recipient: "Facebook says this person isn't available" };
+const tabHas = (k, l) => k === "all" || (k === "done" ? DONE.has(l.status) : k === "approved" ? SENDING.has(l.status) : l.status === k);
+let data = { leads: [] }, tab = "todo";
+try { tab = localStorage.getItem("tab") || "todo"; } catch (e) {}
+
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2600); }
+function ago(iso, label) {
+  if (!iso) return label ? `“${label}”` : "date unknown";
+  const d = (Date.now() - new Date(iso)) / 864e5;
+  return d < 1 ? "today" : d < 2 ? "yesterday" : `${Math.floor(d)} days ago`;
+}
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+async function load() { data = await api("/api/state"); render(); }
+
+const visible = l => tabHas(tab, l);
+function renderTabs() {
+  const n = k => data.leads.filter(l => tabHas(k, l)).length;
+  $("#tabs").innerHTML = TABS.map(([k, t]) => `<button data-tab="${k}" aria-pressed="${tab === k}">${t} (${n(k)})</button>`).join("");
+}
+function card(l) {
+  const a = l.ai, capHit = data.sent_today >= data.cap, done = l.status !== "todo";
+  const minor = a.likely_minor;
+  return `<article class="card ${done ? "done" : ""}" data-key="${esc(l.post_key)}">
+    <div class="top">
+      <span class="who">${l.author_url ? `<a href="${esc(l.author_url)}" target="_blank" rel="noopener">${esc(l.author || "Unknown")}</a>` : esc(l.author || "Unknown")}</span>
+      <span class="sub">${esc(l.group || (l.sources || [])[0] || "")} · ${ago(l.posted_at, l.time_label)} · ${esc(a.author_role)}</span>
+      <span class="score" title="${esc(a.reason)}">${a.score}</span>
+    </div>
+    <div class="chips">${(a.categories || []).map(c => `<span class="chip">${esc(c.replace(/_/g, " "))}</span>`).join("")}</div>
+    <div class="need"><b>Need:</b> ${esc(a.need)}</div>
+    <blockquote>${esc(l.text)}</blockquote>
+    ${minor ? `<div class="warn">Looks like the author may be under 18 (${esc(a.minor_evidence)}). ${l.dm_allowed ? "" : "DMs are off for this lead; use the public comment, or skip."}</div>` : ""}
+    ${!l.author_key ? `<div class="warn">Couldn't read this author's profile link. Open the post and message them from there.</div>` : ""}
+    ${done ? `<div class="status">${esc(LABEL[l.status] || l.status)}</div>` : ""}
+    ${l.why ? `<div class="sub">${esc(l.why)}</div>` : ""}
+    ${l.dm_allowed ? `<label>Private message <span class="count" data-count="dm"></span></label>
+    <textarea data-field="dm" ${done ? "readonly" : ""}>${esc(l.dm)}</textarea>` : ""}
+    <label>Public comment <span class="count" data-count="comment"></span></label>
+    <textarea class="c" data-field="comment" ${done ? "readonly" : ""}>${esc(l.comment)}</textarea>
+    ${["approved", "gave_up"].includes(l.status) ? `<div class="actions"><button data-act="unapproved">Unapprove</button></div>` : ""}
+    ${done ? "" : `<div class="actions">
+      ${l.dm_allowed ? `<button class="primary" data-act="approved" ${!l.messenger_url ? "disabled" : ""} title="send.py sends exactly this text">Approve for sending</button>
+      <button data-act="messenger" ${capHit || !l.messenger_url ? "disabled" : ""} title="${capHit ? "Daily DM limit reached" : ""}">Copy &amp; open Messenger</button>
+      <button class="ok" data-act="sent" ${capHit ? "disabled" : ""}>Mark sent</button>` : ""}
+      ${l.post_url ? `<button data-act="comment">Copy comment &amp; open post</button>
+      <button class="ok" data-act="commented">Mark commented</button>` : ""}
+      <button data-act="skipped">Skip</button>
+      <button data-act="not_relevant">Not relevant</button>
+    </div>`}
+  </article>`;
+}
+function render() {
+  $("#sent").textContent = data.sent_today; $("#cap").textContent = data.cap;
+  renderTabs();
+  const items = data.leads.filter(visible);
+  $("#list").innerHTML = items.length ? items.map(card).join("")
+    : `<p class="empty">${tab === "todo" ? "Nothing left to review. Run the scraper again later for new posts."
+        : tab === "approved" ? "Nothing approved. Approve DMs in To review, then run python run.py send." : "Nothing here."}</p>`;
+  document.querySelectorAll("textarea").forEach(counter);
+}
+function counter(ta) {
+  const c = ta.closest(".card").querySelector(`[data-count="${ta.dataset.field}"]`);
+  if (c) c.textContent = `${ta.value.trim().split(/\s+/).filter(Boolean).length} words`;
+}
+const lead = el => data.leads.find(l => l.post_key === el.closest(".card").dataset.key);
+const field = (el, f) => el.closest(".card").querySelector(`textarea[data-field="${f}"]`)?.value ?? "";
+
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) { const t = document.createElement("textarea"); t.value = text; document.body.append(t); t.select();
+              const ok = document.execCommand("copy"); t.remove(); return ok; }
+}
+
+document.addEventListener("click", async e => {
+  const t = e.target.closest("[data-tab]");
+  if (t) { tab = t.dataset.tab; try { localStorage.setItem("tab", tab); } catch (_) {} return render(); }
+  const b = e.target.closest("[data-act]");
+  if (!b) return;
+  const l = lead(b), act = b.dataset.act;
+  if (act === "messenger") {
+    await copy(field(b, "dm"));
+    window.open(l.messenger_url, "_blank", "noopener");
+    return toast("Message copied. Paste it in Messenger, send it, then click Mark sent.");
+  }
+  if (act === "comment") {
+    await copy(field(b, "comment"));
+    window.open(l.post_url, "_blank", "noopener");
+    return toast("Comment copied. Paste it under the post, then click Mark commented.");
+  }
+  if (act === "sent" && !confirm(`Did you send the message to ${l.author}?`)) return;
+  b.disabled = true;
+  try {
+    const message = ["sent", "approved"].includes(act) ? field(b, "dm") : act === "commented" ? field(b, "comment") : "";
+    await api("/api/mark", { post_key: l.post_key, status: act, message });
+    await load();
+    toast(LABEL[act] || "Saved");
+  } catch (err) { b.disabled = false; toast(err.message); }
+});
+
+let saveTimer;
+document.addEventListener("input", e => {
+  const ta = e.target.closest("textarea[data-field]");
+  if (!ta) return;
+  counter(ta);
+  const l = lead(ta);
+  l[ta.dataset.field] = ta.value;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => api("/api/draft", { post_key: l.post_key, [ta.dataset.field]: ta.value }).catch(err => toast(err.message)), 600);
+});
+
+load().catch(err => { $("#list").innerHTML = `<p class="empty">Couldn't reach the queue server: ${esc(err.message)}</p>`; });
+</script>
+</body>
+</html>
