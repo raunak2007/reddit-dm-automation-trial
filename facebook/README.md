@@ -11,6 +11,8 @@ scrape.py ──► data/leads.json ──► qualify.py (Claude) ──► send
   Facebook session)          DM + comment drafts)      leads, sends)     (who's been contacted)
 
 queue_server.py (optional): look at leads, edit drafts or skip people before a send
+comment.py (outreach.auto_comment): posts the public comment on leads that won't get a DM
+replies.py: looks in each DMed chat for a reply ──► data/replies.csv
 ```
 
 **Every new lead at or above `ai.min_score` is sent its drafted DM** (`outreach.auto_approve`, on
@@ -79,7 +81,7 @@ run `python run.py qualify --rescore` to redraft every lead.
 ## Daily use
 
 ```bash
-python run.py                      # scrape -> score/draft -> send
+python run.py                      # scrape -> score/draft -> send (-> comment, with outreach.auto_comment)
 python run.py scrape --limit-pages 1   # quick test on one search page
 python run.py queue                # look at leads, edit drafts or skip people (optional)
 python run.py send                 # approve new leads and press Send for each
@@ -88,6 +90,12 @@ python run.py stats
 python send.py --list              # what's approved and why any would be skipped
 python send.py held                # sends that couldn't be confirmed (the next run checks them)
 python send.py resolve <author_key> --sent | --not-sent
+python run.py comment              post the drafted public comment on leads that won't get a DM
+python comment.py --list           who would get a comment, and why the others won't
+python comment.py held             comments that couldn't be confirmed
+python comment.py resolve <post_key> --commented | --not-commented
+python run.py replies              look for replies in every DMed chat -> data/replies.csv
+python replies.py --list           who has replied
 ```
 
 In the queue (http://127.0.0.1:8765):
@@ -131,18 +139,66 @@ failed is retried on later runs, up to `outreach.max_attempts_per_recipient` (3)
 `outreach.min_delay_seconds` to `max_delay_seconds` (60–180 s) between sends, and only one `send.py`
 runs at a time. Don't scrape while it runs: they share the Chrome profile.
 
+## Public comments (comment.py)
+
+Off unless you turn it on: set `outreach.auto_comment` to `true` and `python run.py` runs `comment.py` after
+sending (`python run.py comment` runs it on its own whenever you ask). The comment is the alternative to a DM, so it
+only goes where `send.py` won't send one:
+
+- leads with no profile link to message (the queue shows these with a note to reply from the post), and
+- authors the AI thinks are under 18 (`minor_policy` `comment_only`), **only** with `outreach.auto_comment_minors`
+  set to `true`. It's `false` by default: a public reply to someone who may be a minor is left to you, with
+  **Copy comment & open post** in the queue.
+
+Each lead must be at or above `ai.min_score`, have a drafted comment (your edit, if you made one) and a link to
+the post, and still be in **To review**. As with **Mark commented**, a comment counts as contacting that person:
+nobody who has been DMed, commented on or held (on any of their posts), or has a DM approved and waiting, gets a
+comment, and nobody commented on is DMed afterwards.
+
+For each one, `comment.py` opens the post, finds that post on the page (the article with the author's name and the
+start of the post's text) and its own **Write a comment** box (not a reply box inside someone's comment, and not
+another post's box), checks the comment isn't already there, types it, writes a `comment_submitting` row, presses
+Enter **once**, and records `commented` (the same status **Mark commented** writes) as soon as the box clears. If
+something goes wrong after Enter and the comment can't be seen on the post, it's `comment_uncertain` and held: the
+next run looks for it and records it `commented` if it's there, but never clears it on its own (Facebook doesn't
+always show every comment, so not seeing it isn't proof). `python comment.py resolve <post_key> --not-commented`
+makes it eligible again once you've checked. A post that takes no comments (members only, turned off) is
+`comment_closed` and not tried again.
+
+It stops (exit code 2) on a logout, checkpoint, "temporarily blocked" or "we limit how often you can comment"
+dialog, and after 3 failures, 3 closed posts or 2 unconfirmed comments in a row. `outreach.daily_comment_limit`
+(10) counts comments from here and **Mark commented** clicks, separately from the DM cap; it waits
+`comment_min_delay_seconds` to `comment_max_delay_seconds` (90–240 s) between comments.
+
+## Replies (replies.py)
+
+`python run.py replies` opens the chat of everyone with a `sent` DM who isn't in `data/replies.csv` yet (most recent
+DM first, at most `outreach.replies_per_run`, 30, a run, `reply_min_delay_seconds` to `reply_max_delay_seconds`,
+20–60 s, apart) and reads it. It never types anything. It finds our DM in the chat (the text in `leads.json`) and
+counts any message **from them after it** as a reply; their messages from before our DM don't count. Who wrote a
+message comes from Messenger's screen-reader label on each message row ("You sent" / their name) and, without one,
+from which side the bubble is on; rows it can't place never count. Each reply is one row in `data/replies.csv`:
+`author_key, author, post_key, seen_at, snippet, chat_url`. If our DM can't be found in the chat, that person is
+checked again next run. Opening a chat marks their messages as seen, as it would by hand. It stops (exit code 2)
+on anything account-wide (logged out, checkpoint, block, chat PIN), or after 5 chats in a row it couldn't read.
+
 ## Tests
 
 ```bash
 cd facebook
-../venv/bin/python -m unittest discover tests          # ~45 s, nothing touches facebook.com
+../venv/bin/python -m unittest discover tests          # ~2 min, nothing touches facebook.com
 FB_LIVE=1 ../venv/bin/python -m unittest tests/test_live.py -v    # read-only checks on the real site
 ```
 
 - `tests/test_stops.py`: what a run does on a logout, PIN prompt, checkpoint or block (stops before
   typing, records it, exit 2), and what the next run does after (picks up the same lead, never presses
   Send twice for a message already in the chat, settles held sends).
-- `tests/test_mock_site.py`: `messenger.py`'s real page code in headless Chrome against mock Messenger chats.
+- `tests/test_comment.py`: which leads get a comment (minors skipped by default, never anyone already DMed or
+  commented on), the daily comment cap, a block halting the run (exit 2), held comments, `run.py`'s exit codes.
+- `tests/test_replies.py`: a reply after our DM counts, only our DM or their earlier message doesn't, dedupe, a block.
+- `tests/test_mock_site.py`: `messenger.py`'s and `comment.py`'s real page code in headless Chrome against mock
+  Messenger chats and posts (the post's own comment box, not a reply box or another post's; Enter once), and
+  reading who wrote each message in a chat.
 - `tests/test_live.py`: off unless `FB_LIVE=1`. Checks the real profile is logged in as the sender and the
   inbox has no PIN prompt or block. Add `FB_LIVE_CHAT=<author_key> FB_LIVE_NAME="Their Name"` to also open
   one chat. It never types anything. Run it before the first real `send.py`, and after Facebook changes
@@ -154,6 +210,8 @@ FB_LIVE=1 ../venv/bin/python -m unittest tests/test_live.py -v    # read-only ch
   `data/contacted.csv`: `send.py` sends, **Mark sent** clicks, and held sends from today. Both the queue
   server and `send.py` enforce it. New or low-activity accounts should start around 10.
 - **One DM per person, ever.** That includes held sends: their other posts aren't offered.
+- **Daily comment cap** (`outreach.daily_comment_limit`, default 10), separate from the DM cap. One comment per
+  person, and only to people who won't get a DM.
 - **Minors** (`outreach.minor_policy`): if the AI thinks the author is under 18, the default
   `comment_only` turns off the DM and offers only the public comment. Set it to `skip` to hide
   those leads. A parent posting about their child is not flagged.

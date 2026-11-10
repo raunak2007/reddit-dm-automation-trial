@@ -190,6 +190,7 @@ class PrepareStopsBeforeAnyChat(FakeChromeTest):
         with self.assertRaises(SystemExit) as stop:
             send.prepare(self.driver({"text": PIN_TEXT}), config())
         self.assertIn("PIN", str(stop.exception))
+        self.assertEqual(stop.exception.code, 2, "account-wide: the scheduler notifies on 2")
 
     def test_pin_on_the_inbox_waits_for_you_by_hand(self):
         self.patch(send, "input", create=True, return_value="")
@@ -204,17 +205,20 @@ class PrepareStopsBeforeAnyChat(FakeChromeTest):
         with self.assertRaises(SystemExit) as stop:
             send.prepare(self.driver({"redirect": "https://www.facebook.com/checkpoint/1501092823525282/"}), config())
         self.assertIn("restricted", str(stop.exception))
+        self.assertEqual(stop.exception.code, 2)
 
     def test_logged_out_stops_an_unattended_run(self):
         driver = FakeChrome({"https://www.facebook.com/": {"text": "Log in to Facebook  Create new account"}})
         with self.assertRaises(SystemExit) as stop:
             send.prepare(driver, config())
         self.assertIn("python run.py login", str(stop.exception))
+        self.assertEqual(stop.exception.code, 2)
 
     def test_wrong_account_stops_the_run(self):
         with self.assertRaises(SystemExit) as stop:
             send.prepare(self.driver({"text": "Chats"}, me="999"), config())
         self.assertIn("999", str(stop.exception))
+        self.assertNotEqual(stop.exception.code, 2, "a config mismatch is yours to fix, not an account block")
 
 
 class FacebookWording(unittest.TestCase):

@@ -1,0 +1,57 @@
+{
+  "time": "10:00",
+  "timeout_minutes": 120,
+  "jobs": [
+    {
+      "name": "reddit",
+      "dir": ".",
+      "run": [
+        "reddit/run.py"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "reddit",
+      "dir": ".",
+      "run": [
+        "reddit/run.py",
+        "replies"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "facebook",
+      "dir": "facebook",
+      "run": [
+        "run.py"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "facebook",
+      "dir": "facebook",
+      "run": [
+        "run.py",
+        "replies"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "instagram",
+      "dir": "instagram",
+      "run": [
+        "run.py"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "instagram",
+      "dir": "instagram",
+      "run": [
+        "run.py",
+        "replies"
+      ],
+      "enabled": true
+    }
+  ]
+}

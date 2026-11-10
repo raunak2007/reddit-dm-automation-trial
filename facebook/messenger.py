@@ -87,6 +87,32 @@ const FBM = (() => {
     send: () => [...main().querySelectorAll('[role="button"], button')].filter(el =>
       visible(el) && /^(press enter to send|send)$/i.test((el.getAttribute('aria-label') || '').trim())),
     has: want => squash(text(main(), '')).includes(squash(want)),
+    // The chat's messages, oldest first, as {who, text, label, side}. Each message is a top-level [role=row]
+    // (Messenger's chat is a [role=grid] of rows). Who wrote it, two ways:
+    //   label  the row's screen-reader heading: "You sent" / "You replied" for ours, their name for theirs
+    //   side   which side of the row its text sits on: ours on the right, theirs on the left; centred rows
+    //          (dates, "You can now message each other") are neither
+    // who is the label's answer, else the side's; '' when neither says or they disagree (such rows never count).
+    rows: name => {
+      const first = squash((name || '').split(/\s+/)[0]);
+      const HEAD = 'h1, h2, h3, h4, h5, h6';
+      return [...main().querySelectorAll('[role="row"]')]
+        .filter(r => !r.parentElement.closest('[role="row"]') && visible(r))
+        .map(row => {
+          const label = ([...row.querySelectorAll(HEAD)].map(h => h.textContent.trim()).find(Boolean) || '');
+          const byLabel = /^you\b/i.test(label) ? 'me' : first && squash(label).startsWith(first) ? 'them' : '';
+          const bits = [...row.querySelectorAll('[dir="auto"]')].filter(el =>
+            !el.closest(HEAD) && !el.querySelector('[dir="auto"]') && visible(el));
+          let side = '';
+          if (bits.length) {
+            const r = row.getBoundingClientRect(), b = bits[0].getBoundingClientRect();
+            const off = (b.left + b.right) / 2 - (r.left + r.right) / 2;
+            side = off > r.width * 0.1 ? 'me' : off < -r.width * 0.1 ? 'them' : '';
+          }
+          const who = byLabel && side && byLabel !== side ? '' : (byLabel || side);
+          return {who, label, side, text: bits.map(el => text(el, ' ')).join(' ').replace(/\s+/g, ' ').trim()};
+        });
+    },
     notice: pattern => {
       const re = new RegExp(pattern, 'i');
       for (const root of roots()) {
@@ -150,6 +176,12 @@ def page_says(driver, name):
 
 def in_chat(driver, text):
     return js(driver, "has", text)
+
+
+def thread(driver, name):
+    """The open chat's messages, oldest first: [{who: 'me' | 'them' | '', text, label, side}] (see rows in _JS).
+    Reads the page only; replies.py decides from it whether they wrote back."""
+    return js(driver, "rows", name) or []
 
 
 # ----------------------------------------------------------------- the steps

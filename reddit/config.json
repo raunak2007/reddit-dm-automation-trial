@@ -1,0 +1,62 @@
+{
+  "business": {
+    "name": "Aristo Scholars",
+    "website": "https://aristoscholars.com",
+    "booking_link": "https://aristoscholars.com/#get-started",
+    "sender_first_name": "Ameer",
+    "services": [
+      "1:1 college admissions counseling (school list, strategy, timelines)",
+      "Common App / supplemental essay coaching",
+      "Scholarship and financial aid search and applications",
+      "Internship and summer program search, resumes and outreach",
+      "Transfer and graduate school applications"
+    ],
+    "offer": "a free 20-minute call to look at their situation and give a few concrete next steps"
+  },
+
+  "search": {
+    "lookback_days": 7,
+    "subreddits": [
+      "ApplyingToCollege",
+      "collegeresults",
+      "scholarships",
+      "chanceme",
+      "CollegeEssays"
+    ],
+    "keywords": [
+      "counselor",
+      "consultant",
+      "essay help",
+      "review my essay",
+      "personal statement",
+      "need advice",
+      "scholarship",
+      "financial aid",
+      "parent",
+      "transfer"
+    ],
+    "read_new_feeds": true,
+    "max_pages_per_listing": 3,
+    "max_requests_per_run": 80,
+    "skip_authors": ["AutoModerator"],
+    "skip_nsfw": true
+  },
+
+  "ai": {
+    "model": "claude-sonnet-5-5",
+    "min_score": 60,
+    "max_posts_per_run": 300
+  },
+
+  "outreach": {
+    "auto_approve": true,
+    "minor_policy": "skip",
+    "subject": "About your post"
+  },
+
+  "browser": {
+    "profile": "account_1",
+    "min_request_delay_seconds": 3,
+    "max_request_delay_seconds": 7
+  }
+}

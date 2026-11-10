@@ -7,6 +7,9 @@ profile_page()  a profile whose header has a Follow button (plus Message and Opt
                 turns it into Following / Requested, or pops up a block, depending on `then`.
 chat_page()     a Direct chat: one contenteditable message box, a Send button, Enter sends, the box clears, and
                 the message is POSTed back to the site (site.sent), which shows it when the chat is reloaded.
+grid_page()     a profile whose grid links to its posts and reels (discover.py's fallback when the API is silent).
+inbox_page()    the Direct inbox's chat list: one row per chat with a name and a preview "text · 2h", no links
+                (replies.py's fallback when the inbox endpoint is silent).
 They are only as faithful as the markup copied into them: when the real page changes, copy the new markup from a
 step*_failed_dom.txt (or test_live.py's debug/live/ files) into here.
 """
@@ -173,3 +176,26 @@ def chat_page(site, user, *, name="", notice="", draft="", dialog=""):
                            dialog=f'<div role="dialog"><div>{html.escape(dialog)}</div><button>OK</button></div>'
                                   if dialog else "")
     return render
+
+
+def grid_page(user, links):
+    """@user's profile with a grid of links (paths like /<user>/p/<code>/ or /reel/<code>/), each shown twice the
+    way the grid's image and its hover overlay both link, plus a post link in the nav outside the main area."""
+    cells = "".join(f'<div><a href="{html.escape(l)}" role="link"><img alt="Photo by {html.escape(user)}"></a>'
+                    f'<a href="{html.escape(l)}"><span>12</span></a></div>' for l in links)
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>@{user} • Instagram</title>{STYLE}</head><body>
+{NAV}<div role="navigation"><a href="/p/NAVPOST/">a post outside the profile</a></div><main role="main">
+<header><section><h2>{html.escape(user)}</h2><button>Edit profile</button></section></header>
+<div role="tablist"><a href="/{user}/">Posts</a><a href="/{user}/reels/">Reels</a><a href="/{user}/tagged/">Tagged</a></div>
+<article>{cells}</article></main></body></html>"""
+
+
+def inbox_page(chats):
+    """The inbox list. chats: [(name, preview, age)], e.g. ("Jane Doe", "You: hey jane!", "2h")."""
+    rows = "".join(f"""<div role="button" tabindex="0"><img alt="{html.escape(n)}'s profile picture" width="20">
+  <div><div><span>{html.escape(n)}</span></div><div><span>{html.escape(p)}</span><span> · </span><abbr>{a}</abbr></div></div>
+</div>""" for n, p, a in chats)
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>Inbox • Direct</title>{STYLE}</head><body>
+{NAV}<main role="main"><div><h1>me.test</h1><div role="button" tabindex="0" aria-label="New message">New</div></div>
+<div><span>Messages</span><span>Requests</span></div>
+<div aria-label="Thread list" role="list" style="height:300px;overflow:auto">{rows}</div></main></body></html>"""

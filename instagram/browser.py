@@ -24,6 +24,18 @@ from chrome_version import chrome_major           # noqa: E402
 LOGGED_OUT = ("log in to instagram", "sign up for instagram", "forgot password?", "phone number, username, or email")
 
 
+class Halt(SystemExit):
+    """An account-wide stop (logged out, challenge, action block): exits with code 2, so a scheduler can tell it
+    from an ordinary failure (1). str() is the reason; the entry points print it (python itself wouldn't)."""
+
+    def __init__(self, why: str):
+        super().__init__(2)
+        self.why = why
+
+    def __str__(self):
+        return self.why
+
+
 def make_driver(cfg: dict):
     b = cfg["browser"]
     if b.get("user_data_dir"):
@@ -58,16 +70,17 @@ def logged_in(driver) -> bool:
 
 
 def ensure_logged_in(driver, cfg: dict, interactive: bool = True):
-    """Open instagram.com; if it shows the login page, wait for you to log in in the window."""
+    """Open instagram.com; if it shows the login page, wait for you to log in in the window (interactive), else
+    stop with Halt (exit code 2)."""
     driver.get("https://www.instagram.com/")
     pause(cfg, 0.6)
     if logged_in(driver):
         return
     if not interactive:
-        sys.exit("Not logged in to Instagram in this profile. Run: python run.py login")
+        raise Halt("Not logged in to Instagram in this profile. Run: python run.py login")
     print("[!] Not logged in. Log in to Instagram in the Chrome window (including any 2FA / security check).")
     input("    Press Enter here once your feed is showing... ")
     driver.get("https://www.instagram.com/")
     pause(cfg, 0.6)
     if not logged_in(driver):
-        sys.exit("Still not logged in; stopping.")
+        raise Halt("Still not logged in; stopping.")

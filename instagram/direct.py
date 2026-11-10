@@ -420,5 +420,8 @@ if __name__ == "__main__":
         input("Press Enter here to close Chrome... ")
     except KeyboardInterrupt:
         pass
+    except browser.Halt as stop:
+        print(f"[stopped] {stop}")
+        raise SystemExit(2)
     finally:
         chrome.quit()

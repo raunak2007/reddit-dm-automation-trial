@@ -8,10 +8,15 @@ FakeChrome  a stand-in driver that answers direct.py's page helpers (notice, com
             "follow": True (a Follow button in the profile header), "following": True,
             "on_follow": {what changes on the page once Follow is pressed}}}. It runs the real patterns in
             direct.py against that text, so a test shows what send.py does when Instagram shows it.
+FakeAPI     a FakeChrome that also answers comments.api's in-page fetches from a dict of fake JSON answers:
+            {"<path prefix after /api/v1/>": dict (200 + that JSON), (status, body), or a function of the full
+            URL returning either}. The longest matching prefix wins; anything else is a 404. fetched lists every
+            URL asked for.
 """
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import sys
@@ -115,6 +120,31 @@ class FakeChrome:
         return True
 
 
+class FakeAPI(FakeChrome):
+    def __init__(self, answers=None, grid=None, **kw):
+        super().__init__(**kw)
+        self.answers, self.grid, self.fetched = answers or {}, grid or [], []
+        self.current_url = f"{IG}/"
+
+    def execute_async_script(self, script, url, app_id):
+        self.fetched.append(url)
+        path = url.split("/api/v1/", 1)[1]
+        keys = sorted((k for k in self.answers if path.startswith(k)), key=len, reverse=True)
+        answer = self.answers[keys[0]] if keys else (404, "{}")
+        if callable(answer):
+            answer = answer(url)
+        status, body = answer if isinstance(answer, tuple) else (200, json.dumps(answer))
+        return {"status": status, "body": body}
+
+    def execute_script(self, script, fn=None, *args):
+        if "(p|reel|tv)" in script:                 # discover._GRID: the profile grid's links
+            return self.grid
+        return super().execute_script(script, fn, *args)
+
+    def quit(self):
+        pass
+
+
 def profile(user):
     return f"{IG}/{user}/"
 
@@ -133,7 +163,8 @@ class StoreTest(unittest.TestCase):
         self.tmp = Path(tmp.name)
         data = self.tmp / "data"
         for name, value in (("DATA", data), ("LEADS", data / "leads.json"), ("CONTACTED", data / "contacted.csv"),
-                            ("LOCK", data / "send.lock")):
+                            ("LOCK", data / "send.lock"), ("POSTS", data / "posts.json"),
+                            ("REPLIES", data / "replies.csv")):
             self.patch(store, name, value)
         cwd = os.getcwd()
         os.chdir(self.tmp)

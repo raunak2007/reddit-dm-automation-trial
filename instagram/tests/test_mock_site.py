@@ -15,10 +15,13 @@ import unittest
 from unittest import mock
 
 import helpers  # noqa: F401  (puts the instagram folder on sys.path)
-from mock_site import MockSite, chat_page, headless_chrome, profile_page
+from helpers import config
+from mock_site import MockSite, chat_page, grid_page, headless_chrome, inbox_page, profile_page
 from selenium.common.exceptions import TimeoutException
 
 import direct
+import discover
+import replies
 import send_dm
 from send_dm import AccountBlocked, NoSuchUser
 
@@ -180,6 +183,38 @@ class Chat(MockInstagram):
         driver.get(site.url(THREAD))
         direct.check_account(driver)
         direct.check_recipient(driver, USER)
+
+
+class Fallbacks(MockInstagram):
+    """The page-reading fallbacks for when Instagram's API doesn't answer: discover.py's profile grid and
+    replies.py's chat list, with their real page code."""
+
+    def test_profile_grid_links_newest_first_once_each(self):
+        site.pages["/me.test/"] = grid_page("me.test", ["/me.test/p/POST1/", "/me.test/reel/REEL2/", "/p/POST3/"])
+        posts = discover.from_page(driver, config(), "me.test")
+        self.assertEqual([(p["shortcode"], p["url"]) for p in posts],
+                         [("POST1", "https://www.instagram.com/p/POST1/"),
+                          ("REEL2", "https://www.instagram.com/reel/REEL2/"),
+                          ("POST3", "https://www.instagram.com/p/POST3/")], "the nav's post link isn't one")
+
+    def test_profile_grid_with_a_block_stops(self):
+        site.pages["/me.test/"] = profile_page("me.test", notifications=False).replace(
+            "<article>", '<div role="dialog">Action Blocked. This action was blocked. Please try again later. We '
+                         'restrict certain activity to protect our community.</div><article>')
+        with self.assertRaises(AccountBlocked):
+            discover.from_page(driver, config(), "me.test")
+
+    def test_inbox_chat_list_finds_replies(self):
+        site.pages["/direct/inbox/"] = inbox_page([("Jane Doe", "yes! how does the call work", "2h"),
+                                                   ("Sam P", "You: hey sam! saw your comment", "1d"),
+                                                   ("Other Person", "hello", "5m")])
+        rows = replies.via_page(driver, config())
+        sent = {"jane.doe": "2026-11-01T10:00:00", "sam.p": "2026-11-01T10:00:00"}
+        out, seen = replies.from_rows(rows, sent, {"jane.doe": "Jane Doe", "sam.p": "Sam P"},
+                                      replies.datetime(2026, 11, 9, 12, 0))
+        self.assertEqual(seen, {"jane.doe", "sam.p"})
+        self.assertEqual([(r["username"], r["snippet"], r["replied_at"]) for r in out],
+                         [("jane.doe", "yes! how does the call work", "2026-11-09T10:00:00")])
 
 
 if __name__ == "__main__":

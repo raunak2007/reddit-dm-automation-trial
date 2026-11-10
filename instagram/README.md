@@ -1,12 +1,16 @@
 # Instagram Commenter Outreach
 
-Give it the link to an Instagram post or reel. It reads everyone who commented, has Claude pick out
-the ones asking about college admissions, essays, scholarships or internships, and writes each of
-them a short, casual DM that starts with their name. Then `send.py` sends them the way `run_loop.py`
-sends the Reddit queue on `master`: no approving, and it presses Send itself.
+It finds your recent Instagram posts and reels on its own, reads everyone who commented, has Claude
+pick out the ones asking about college admissions, essays, scholarships or internships, and writes
+each of them a short, casual DM that starts with their name. Then `send.py` sends them the way
+`run_loop.py` sends the Reddit queue on `master`: no approving, and it presses Send itself. Later,
+`python run.py replies` checks who wrote back.
 
 ```bash
-python run.py https://www.instagram.com/p/XXXXXXXX/    # read comments, draft DMs, send them
+python run.py                                          # the daily run: find recent posts, read comments, draft DMs, send
+python run.py replies                                  # who replied to their DM -> data/replies.csv
+python run.py stats                                    # posts, leads, sent, held, replied
+python run.py https://www.instagram.com/p/XXXXXXXX/    # the same run for one post you name
 python run.py send                                     # send any drafted DMs that haven't gone out yet
 ```
 
@@ -49,6 +53,62 @@ python run.py send            # the first time, says which account is logged in:
 
 In `config.json`, set `instagram.my_username` to your handle so you're never in your own list, and
 fill in `business.website` and `business.booking_link`.
+
+## Daily use
+
+```bash
+python run.py          # (or python run.py auto) once or twice a day
+python run.py replies  # whenever you like; it only reads
+python run.py stats
+```
+
+`python run.py` with no link:
+
+1. **Finds the posts** (`discover.py`): your recent posts and reels (`instagram.my_username`), plus
+   those of any accounts in `discover.accounts` and any links in `discover.posts`. It asks Instagram's
+   own web API inside the logged-in Chrome profile (`users/web_profile_info`, then `feed/user/<id>`,
+   the way `comments.py` reads comments); if that doesn't answer, it reads the profile page's grid.
+2. **Reads each one's comments** if it was posted within `discover.lookback_days`, newest first, up to
+   `discover.max_posts` per account. Every run reads them again, so new commenters are picked up; with
+   `discover.skip_unchanged` a post whose comment count hasn't changed since its last read is skipped.
+   A post whose date isn't known (a `discover.posts` link, or one found only on the profile grid) is
+   dated from when it was first seen.
+3. Scores the new commenters and drafts their DMs (`qualify.py`), then sends (`send.py`), exactly as
+   with a link.
+
+`data/posts.json` remembers each post found: when it was posted and first seen, its comment count,
+when it was last read and how often. `python run.py posts` lists it (`*` = still within the lookback).
+
+**Exit codes**, for a scheduler: `0` done, `2` stopped on an account-wide problem (logged out, a
+security check / challenge, an action block or rate limit, a locked account, or a streak of failed
+sends), `1` anything else (a bad link or setting, another run already using the profile). Reading
+posts or replies stops at once on the same signals as sending, and nothing is sent after a stop
+while reading. Only one run uses the Chrome profile at a time.
+
+### Replies
+
+`python run.py replies` reads your Direct inbox through the web API (`direct_v2/inbox/`, page by
+page). It never opens a chat, so nothing is marked seen, liked or sent. For everyone
+`data/contacted.csv` records as `sent`, it finds their one-to-one chat and records each message
+from them dated after our DM: username, when, a short snippet and the chat link, in
+`data/replies.csv`, once per message (Instagram's item id), then prints the new ones and how many
+people have replied. `contacted.csv` isn't changed. Paging stops once every DMed person's chat has
+been seen, the chats get older than the first DM, or after `replies.max_pages` pages. If the
+endpoint doesn't answer, it reads the chat list on the inbox page instead (still without opening a
+chat): that gives only each chat's latest message, with an approximate time. Chats sitting in
+Message Requests (or a creator account's General tab) may not show up.
+
+### Settings
+
+| Key | Default | What it does |
+|---|---|---|
+| `discover.lookback_days` | 7 | Read a post while it is this many days old or newer. |
+| `discover.max_posts` | 6 | At most this many recent posts per account per run. |
+| `discover.accounts` | `[]` | Other usernames whose recent posts to read too. |
+| `discover.posts` | `[]` | Post or reel links to watch (dated from when first seen; no `max_posts` cap). |
+| `discover.skip_unchanged` | `true` | Skip a post whose comment count hasn't changed since it was last read. |
+| `replies.max_pages` | 10 | Inbox pages (20 chats each) to read at most. |
+| `replies.messages_per_chat` | 20 | Latest messages of each chat the inbox returns. |
 
 ## Write your message
 
@@ -128,22 +188,28 @@ action block ("Try Again Later"), or a locked account. It also stops after 3 fai
 a row, 3 refusals from different people in a row, or 2 unconfirmed sends in a row. Someone refused or
 failed is retried on later runs, up to `outreach.max_attempts_per_recipient` (3). It waits
 `outreach.min_delay_seconds` to `max_delay_seconds` (60–180 s) between sends, and only one `send.py`
-runs at a time. Don't read comments while it runs: they share the Chrome profile.
+runs at a time. Don't read comments while it runs: they share the Chrome profile (`python run.py`
+and `run.py replies` refuse to start while `send.py` runs).
 
 ## Tests
 
 ```bash
 cd instagram
-../venv/bin/python -m unittest discover tests          # ~35 s, nothing touches instagram.com
+../venv/bin/python -m unittest discover tests          # ~50 s, nothing touches instagram.com
 IG_LIVE=1 IG_LIVE_PROFILE=<username> ../venv/bin/python -m unittest tests/test_live.py -v
 ```
 
 - `tests/test_stops.py`: what a run does on a logout, challenge or action block, including one during
   the follow (no DM goes out, exit 2), and what the next run does after (follows and messages the same
   person, never presses Send twice for a message already in the chat, settles held sends).
+- `tests/test_discover.py`: finding posts from fake API answers: the media feed, the lookback and
+  `max_posts`, pinned posts, `data/posts.json` across runs, the profile-grid fallback, and `python run.py`
+  exiting 2 (and sending nothing) when Instagram refuses the account.
+- `tests/test_replies.py`: fake inbox answers: matching chats to the people sent a DM, only their messages
+  after our send counting, dedupe by item id, paging, the chat-list fallback, and `stats`' replied count.
 - `tests/test_mock_site.py`: `direct.py`'s real page code in headless Chrome against mock profiles and chats.
   This covers the Follow button lookup: header Follow, not "Suggested for you"; Following / Requested left
-  alone; both block popups; the notifications dialog.
+  alone; both block popups; the notifications dialog. Also the two page fallbacks (profile grid, inbox list).
 - `tests/test_live.py`: off unless `IG_LIVE=1`. Checks login, the sender id and the inbox. With
   `IG_LIVE_PROFILE` it finds the Follow button on that profile without pressing it. `IG_LIVE_FOLLOW=1` makes
   it really press Follow, so use a test account. `IG_LIVE_CHAT=<username>` also opens one chat. It never types
@@ -165,10 +231,12 @@ IG_LIVE=1 IG_LIVE_PROFILE=<username> ../venv/bin/python -m unittest tests/test_l
 | File | What it does |
 |---|---|
 | `run.py` | The commands above. |
+| `discover.py` | Finds the recent posts to read (web API, else the profile grid) and remembers them in `data/posts.json`. |
 | `comments.py` | Reads all comments and replies, using Instagram's own web endpoint inside your logged-in session. Falls back to reading the page. |
+| `replies.py` | Reads the inbox (web API, else the chat list) for replies to our DMs, into `data/replies.csv`. |
 | `qualify.py` | Scores each comment with Claude and writes the DM. |
 | `queue_server.py`, `queue.html` | The review page. |
 | `send.py` | Approves new leads (`outreach.auto_approve`) and sends the DMs (or `--by-hand`), records and checks every attempt. |
 | `direct.py` | Sends one DM (and with `verify_after_send`, confirms it in the chat). |
 | `store.py` | `data/leads.json` and the ledger in `data/contacted.csv`. |
-| `data/` | `leads.json` (commenters and drafts) and `contacted.csv` (who you've DMed). Not committed. |
+| `data/` | `leads.json` (commenters and drafts), `contacted.csv` (who you've DMed), `posts.json` (posts found and read) and `replies.csv` (who wrote back). Not committed. |

@@ -21,7 +21,8 @@ From that history:
 
 Sends made outside these scripts are pulled in as 'sent' rows too:
     sync_reddit_sent(driver)   everyone in the logged-in account's Reddit sent folder (run at the start of
-                               every run; it also settles earlier uncertain sends that did go out)
+                               every run; it also settles earlier uncertain sends that did go out, and with
+                               config.json "auto_resolve" (on by default) clears the ones that didn't)
     import_sent(...)           sent-folder pages saved from another browser or account
     import_checkmarks(...)     a queue page's Sent checkboxes (they live in the original browser's localStorage)
 
@@ -64,6 +65,7 @@ MAX_ATTEMPTS = 3            # attempts before a recipient is given up on
 MAX_FAILS_IN_A_ROW = 3      # not_submitted in a row: usually the account or the page, not the recipients
 MAX_REFUSALS_IN_A_ROW = 3   # refusals from several unrelated recipients in a row
 MAX_UNCERTAIN_IN_A_ROW = 2  # sends that can't be confirmed in a row: stop before making it worse
+RESOLVE_AFTER = 15 * 60     # seconds: a held send younger than this may not be in the sent folder yet
 OLD_STATUS = {"failed": "not_submitted", "error": "not_submitted", "account": "restricted"}
 
 
@@ -177,10 +179,13 @@ def _record_sent(pages, source):
     return added
 
 
-def sync_reddit_sent(driver, max_pages=SENT_LISTING_CAP // 100 + 2):
+def sync_reddit_sent(driver, max_pages=SENT_LISTING_CAP // 100 + 2, auto_resolve=True):
     """Record everyone the logged-in account has sent a private message to (Reddit's sent folder,
-    newest 100 x max_pages; Reddit lists at most ~1000) and isn't already marked sent here.
+    newest 100 x max_pages; Reddit lists at most ~1000) and isn't already marked sent here. A held send that
+    went out is settled by that 'sent' row; with auto_resolve, one that didn't is cleared (resolve_held()).
     Raises RuntimeError if the folder can't be read, so callers can refuse to send blind."""
+    seen = {"oldest": None, "complete": False}
+
     def pages():
         after = None
         for _ in range(max_pages):
@@ -188,11 +193,41 @@ def sync_reddit_sent(driver, max_pages=SENT_LISTING_CAP // 100 + 2):
                 data = reddit_json(driver, SENT_URL + (f"&after={after}" if after else ""))["data"]
             except (KeyError, TypeError):
                 raise RuntimeError(f"Reddit's sent messages at {driver.current_url} weren't a listing") from None
+            for child in data["children"]:
+                when = child["data"].get("created_utc")
+                if when is not None and (seen["oldest"] is None or when < seen["oldest"]):
+                    seen["oldest"] = when
             yield data
             after = data.get("after")
             if not after:
+                seen["complete"] = True
                 break
-    return _record_sent(pages(), "this account's Reddit sent messages")
+    added = _record_sent(pages(), "this account's Reddit sent messages")
+    if auto_resolve:
+        resolve_held(0 if seen["complete"] else seen["oldest"])
+    return added
+
+
+def resolve_held(listed_since, now=None):
+    """After the sent folder has been read: clear each still-held send it proves didn't go out, so the next
+    send can retry it. A held send is cleared only when the listing reaches back past it (listed_since: the
+    oldest listed message's created_utc, 0 if the whole folder was listed, None if nothing was) and it is at
+    least RESOLVE_AFTER old. Anything else stays held for `python ledger.py resolve`. Returns how many cleared."""
+    now = time.time() if now is None else now
+    cleared = 0
+    for user, row in held().items():
+        try:
+            at = datetime.fromisoformat(row["timestamp"]).timestamp()
+        except ValueError:
+            continue
+        if listed_since is None or at < listed_since or now - at < RESOLVE_AFTER:
+            print(f"[=] u/{user} is still held: the sent folder can't settle it yet")
+            continue
+        record(user, Result("cleared", "checked automatically: not in the sent folder, so the held attempt "
+                                       "did not go out"))
+        print(f"[+] u/{user}: the held send isn't in the sent folder; cleared, so it can be sent again")
+        cleared += 1
+    return cleared
 
 
 def import_sent(paths):
@@ -301,7 +336,8 @@ def checkmark_help(queue_path: Path):
 
 def prepare(driver, cfg):
     """Start of every run, before anything is opened or sent: confirm the browser is logged in as
-    config.json's sender_username, then pull in this account's sent folder. Exits on any problem.
+    config.json's sender_username, then pull in this account's sent folder. Exits on any problem: with code
+    2 if Reddit is refusing the account (logged out, rate-limited, restricted; see daily.py), else 1.
     Returns the sender's username."""
     expected = cfg.get("sender_username")
     try:
@@ -311,9 +347,10 @@ def prepare(driver, cfg):
                              f'is the account that should send, add  "sender_username": "{name}"  and run again.')
         sender = verify_sender(driver, expected)
         print(f"[+] sending as u/{sender}")
-        sync_reddit_sent(driver)
+        sync_reddit_sent(driver, auto_resolve=cfg.get("auto_resolve", True))
     except AccountBlocked as exc:
-        raise SystemExit(f"Not sending ({exc.kind}): {exc}")
+        print(f"Not sending ({exc.kind}): {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
     except RuntimeError as exc:
         raise SystemExit(f"Not sending: {exc}")
     return sender
@@ -350,8 +387,8 @@ def skip_reason(username, max_attempts=MAX_ATTEMPTS):
             return f"{FINAL[r['status']]} ({r['timestamp']})"
     if mine and mine[-1]["status"] in HELD:
         what = "was interrupted after Send was clicked" if mine[-1]["status"] == "submitting" else "couldn't be confirmed"
-        return (f"HELD: the last attempt ({mine[-1]['timestamp']}) {what} and may have gone out. Check the sent "
-                f"folder, then: python ledger.py resolve {username} --sent | --not-sent")
+        return (f"HELD: the last attempt ({mine[-1]['timestamp']}) {what} and may have gone out. The next run "
+                f"checks the sent folder again; or check it yourself: python ledger.py resolve {username} --sent | --not-sent")
     tries = [r for r in mine if r["status"] in ATTEMPTS]
     if len(tries) >= max_attempts:
         refused = sum(1 for r in tries if r["status"] == "refused")

@@ -49,12 +49,18 @@ def dm_allowed(lead: dict, cfg: dict) -> bool:
 
 
 def status_of(lead: dict, cfg: dict, handled: dict, hist: dict) -> str:
-    """Where a scored lead stands: todo / low / approved / held / gave_up / already_contacted, or the queue
-    action or final send outcome last recorded for it (sent, commented, skipped, not_relevant, recipient)."""
+    """Where a scored lead stands: todo / low / approved / held / comment_held / gave_up / already_contacted, or the
+    queue action or final outcome last recorded for it (sent, commented, comment_closed, skipped, not_relevant,
+    recipient). A comment.py attempt that didn't go out (comment_not_submitted, _stopped, _cleared) leaves the lead
+    where it was."""
     a, akey, last = lead["ai"], lead.get("author_key"), handled.get(lead["post_key"])
     max_attempts = cfg["outreach"].get("max_attempts_per_recipient", store.MAX_ATTEMPTS)
     if last in store.HELD:
         return "held"
+    if last in store.COMMENT_HELD:
+        return "comment_held"
+    if last in store.COMMENT_RETRY:
+        last = None
     if last in store.WAITING:
         if not store.skip_reason(akey, max_attempts, hist):
             return "approved"
@@ -113,6 +119,10 @@ def mark(body: dict) -> tuple[HTTPStatus, dict]:
         if now == "held":
             return HTTPStatus.CONFLICT, {"error": "a send to them may have gone out; the next send run checks the chat (or run "
                                                   f"python send.py resolve {akey} --sent or --not-sent)"}
+        if now == "comment_held":
+            return HTTPStatus.CONFLICT, {"error": "a comment on this post may have gone out; the next comment run checks the "
+                                                  f"post (or run python comment.py resolve {lead['post_key']} --commented "
+                                                  f"or --not-commented)"}
         if status == "unapproved" and now not in ("approved", "gave_up"):
             return HTTPStatus.CONFLICT, {"error": "only an approved lead can be unapproved"}
         if status != "unapproved" and now in ("approved", "gave_up"):

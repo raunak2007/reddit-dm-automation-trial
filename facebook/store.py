@@ -22,12 +22,25 @@ data/contacted.csv     one row per event: author_key, author, post_key, status, 
                            login / rate_limited / restricted   account-wide: the run stopped there
                            cleared         a held send checked and found not to have gone out (send.py does
                                            this at the start of each run, or `send.py resolve ... --not-sent`)
+                       from comment.py (the public comment, outreach.auto_comment):
+                           commented       posted, the same status as the queue's "Mark commented"
+                           comment_submitting    written just before Post is pressed (the note is the comment's
+                                           text); with no outcome after it, the comment is HELD
+                           comment_uncertain     Post was pressed but the comment couldn't be confirmed: HELD
+                           comment_not_submitted failed before Post was pressed: retried on a later run
+                           comment_closed  the post doesn't take comments from this account: never retried
+                           comment_stopped account-wide problem before Post was pressed (note says which): the
+                                           run stopped there; retried on a later run, not counted as an attempt
+                           comment_cleared a held comment checked and found not to be on the post
+data/replies.csv       one row per person who wrote back after our DM (replies.py): author_key, author, post_key,
+                       seen_at, snippet, chat_url
 
 From that history, as ledger.py does for Reddit:
     sent_today()       authors DMed (or possibly DMed) since local midnight, across every run and by hand
+    commented_today()  posts commented on (or possibly) since local midnight, by comment.py or "Mark commented"
     skip_reason(a)     why author a must not be DMed now: already sent / commented / unavailable -> never;
-                       last attempt uncertain or interrupted -> held; max attempts failed -> given up
-    lock()             one send.py run at a time
+                       last attempt (DM or comment) uncertain or interrupted -> held; max attempts failed -> given up
+    lock()             one browser run (send.py, comment.py, replies.py) at a time: they share the Chrome profile
 
 Everything is rebuilt from these two files on every run, so nothing resets between runs.
 """
@@ -49,15 +62,23 @@ HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
 LEADS = DATA / "leads.json"
 CONTACTED = DATA / "contacted.csv"
+REPLIES = DATA / "replies.csv"
 LOCK = DATA / "send.lock"
+REPLY_FIELDS = ["author_key", "author", "post_key", "seen_at", "snippet", "chat_url"]
 FIELDS = ["author_key", "author", "post_key", "status", "timestamp", "note"]
 QUEUE_STATUSES = ("approved", "unapproved", "sent", "commented", "skipped", "not_relevant")
 SEND_STATUSES = ("submitting", "uncertain", "refused", "recipient", "not_submitted", "cleared",
                  "login", "rate_limited", "restricted")
-STATUSES = QUEUE_STATUSES + SEND_STATUSES
+COMMENT_STATUSES = ("comment_submitting", "comment_uncertain", "comment_not_submitted", "comment_closed",
+                    "comment_stopped", "comment_cleared")
+STATUSES = QUEUE_STATUSES + SEND_STATUSES + COMMENT_STATUSES
 FINAL = {"sent": "already sent", "commented": "already commented on their post",
          "recipient": "Facebook says this person isn't available"}
 HELD = ("uncertain", "submitting")       # the last row being one of these holds the author
+COMMENT_HELD = ("comment_uncertain", "comment_submitting")     # ...and these hold the author and the post
+COMMENT_ATTEMPTS = ("comment_not_submitted", "comment_uncertain")
+# A post whose last row is one of these had a comment attempt that didn't go out: it can be tried again.
+COMMENT_RETRY = ("comment_not_submitted", "comment_stopped", "comment_cleared")
 ATTEMPTS = ("not_submitted", "refused", "uncertain")
 # A post whose last row is one of these is approved and hasn't gone out yet: send.py picks it up.
 WAITING = ("approved", "cleared", "not_submitted", "refused", "login", "rate_limited", "restricted")
@@ -176,9 +197,10 @@ def history() -> dict[str, list[dict]]:
 
 
 def messaged_authors(hist: dict | None = None) -> set[str]:
-    """Authors never to be offered again: sent, commented, unavailable, or a send that may have gone out."""
+    """Authors never to be offered again: sent, commented, unavailable, or a send or comment that may have gone out."""
     hist = history() if hist is None else hist
-    return {a for a, rows in hist.items() if any(r["status"] in FINAL for r in rows) or rows[-1]["status"] in HELD}
+    return {a for a, rows in hist.items()
+            if any(r["status"] in FINAL for r in rows) or rows[-1]["status"] in HELD + COMMENT_HELD}
 
 
 def handled_posts() -> dict[str, str]:
@@ -199,6 +221,67 @@ def sent_today() -> int:
     return n
 
 
+def commented_today() -> int:
+    """Posts commented on today, each once: by comment.py or by "Mark commented" in the queue. A held comment from
+    today counts too, since it may be on the post; one checked and cleared doesn't."""
+    today, n = date.today().isoformat(), 0
+    by_post = {}
+    for r in _rows():
+        by_post.setdefault(r["post_key"], []).append(r)
+    for rows in by_post.values():
+        if any(r["status"] == "commented" and r["timestamp"].startswith(today) for r in rows):
+            n += 1
+        elif rows[-1]["status"] in COMMENT_HELD and rows[-1]["timestamp"].startswith(today):
+            n += 1
+    return n
+
+
+def held_comments() -> dict[str, dict]:
+    """{post_key: last row} for every post whose last comment attempt has an unknown outcome."""
+    return {p: r for p, r in {r["post_key"]: r for r in _rows()}.items() if r["status"] in COMMENT_HELD}
+
+
+def resolve_comment(post_key: str, posted: bool, how: str = "by hand") -> None:
+    """Settle a held comment: 'commented' (that author is never contacted again), or 'comment_cleared' (eligible
+    again). how: who checked the post, for the note."""
+    last = held_comments().get(post_key)
+    if not last:
+        raise SystemExit(f"{post_key} has no held (uncertain) comment to resolve.")
+    if posted:
+        record(last["author_key"], last["author"], post_key, "commented", f"confirmed {how} after an uncertain attempt")
+    else:
+        record(last["author_key"], last["author"], post_key, "comment_cleared",
+               f"checked {how}: the uncertain comment is not on the post")
+    print(f"[+] {last['author'] or post_key} recorded as {'commented' if posted else 'not commented (eligible again)'}")
+
+
+# ----------------------------------------------------------------- replies
+def replies() -> dict[str, dict]:
+    """{author_key: their row in data/replies.csv}: everyone seen writing back after our DM."""
+    if not REPLIES.exists():
+        return {}
+    with open(REPLIES, newline="") as f:
+        return {r["author_key"]: r for r in csv.DictReader(f)}
+
+
+def record_reply(author_key: str, author: str, post_key: str, snippet: str, chat_url: str) -> bool:
+    """Add one person to data/replies.csv unless they're already in it. Returns True if a row was written."""
+    if author_key in replies():
+        return False
+    DATA.mkdir(exist_ok=True)
+    new = not REPLIES.exists()
+    with open(REPLIES, "a", newline="") as f:
+        w = csv.DictWriter(f, REPLY_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow({"author_key": author_key, "author": author, "post_key": post_key,
+                    "seen_at": datetime.now().isoformat(timespec="seconds"), "snippet": snippet[:200],
+                    "chat_url": chat_url})
+        f.flush()
+        os.fsync(f.fileno())
+    return True
+
+
 def held() -> dict[str, dict]:
     """{author_key: last row} for every author whose last send's outcome is unknown."""
     return {a: rows[-1] for a, rows in history().items()
@@ -214,6 +297,10 @@ def skip_reason(author_key: str, max_attempts: int = MAX_ATTEMPTS, hist: dict | 
         what = "was interrupted after Send was pressed" if mine[-1]["status"] == "submitting" else "couldn't be confirmed"
         return (f"HELD: the last attempt ({mine[-1]['timestamp']}) {what} and may have gone out. The next send.py "
                 f"run checks the chat (or by hand: python send.py resolve {author_key} --sent | --not-sent)")
+    if mine and mine[-1]["status"] in COMMENT_HELD:
+        return (f"HELD: a public comment on their post ({mine[-1]['timestamp']}) may have been posted. The next "
+                f"comment.py run checks the post (or by hand: python comment.py resolve {mine[-1]['post_key']} "
+                f"--commented | --not-commented)")
     tries = [r for r in mine if r["status"] in ATTEMPTS]
     if len(tries) >= max_attempts:
         refused = sum(1 for r in tries if r["status"] == "refused")

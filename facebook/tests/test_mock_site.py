@@ -1,6 +1,7 @@
-"""test_mock_site.py - messenger.py's real page code (its _JS, the waits, typing, pressing Send) in a headless
-Chrome against mock Messenger chats (mock_site.py). Nothing here touches facebook.com; test_live.py does.
-Skipped if Chrome can't start. Takes about a minute.
+"""test_mock_site.py - messenger.py's and comment.py's real page code (their _JS, the waits, typing, pressing Send
+or Enter) in a headless Chrome against mock Messenger chats and Facebook posts (mock_site.py), and replies.py's
+reading of who wrote what in a chat. Nothing here touches facebook.com; test_live.py does.
+Skipped if Chrome can't start. Takes about two minutes.
 
     cd facebook && ../venv/bin/python -m unittest tests/test_mock_site.py
 """
@@ -15,14 +16,19 @@ import unittest
 from unittest import mock
 
 import helpers  # noqa: F401  (puts the facebook folder on sys.path)
-from mock_site import MockSite, chat_page, headless_chrome
+from mock_site import MockSite, chat_page, headless_chrome, post_page
 
+import comment
 import messenger
+import replies
 from send_dm import AccountBlocked
 
 site = driver = None
 PATH = "/messages/t/1001"
 TEXT = "Hi Jane, saw your post about essays. Happy to help: https://example.com/#get-started"
+POST = "/groups/g/posts/1/"
+AUTHOR, POST_TEXT = "Jane Doe", "My daughter needs help with her Common App essay, where do we start?"
+COMMENT = "Start with one moment.\nMore help: example.com"
 
 
 def setUpModule():
@@ -158,6 +164,124 @@ class ReadingThePage(MockChat):
         with self.assertRaises(AccountBlocked) as blocked:
             messenger.check_account(driver)
         self.assertEqual(blocked.exception.kind, "restricted")
+
+
+class Commenting(MockChat):
+    def setUp(self):
+        super().setUp()
+        for p in (mock.patch.object(comment, "POST_URL", re.compile(rf"^{re.escape(site.base)}/\S+$")),
+                  mock.patch.object(comment, "SETTLE", 0.5)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def page(self, **kw):
+        site.pages[POST] = post_page(site, AUTHOR, POST_TEXT, **kw)
+
+    def post(self, text=COMMENT, author=AUTHOR):
+        return comment.post_comment(driver, site.url(POST), text, author, POST_TEXT[:comment.SNIPPET],
+                                    before_submit=lambda: self.pressed.append(True))
+
+    def boxes(self):
+        return driver.execute_script("return [...document.querySelectorAll('[contenteditable=true]')]"
+                                     ".map(b => b.innerText.trim()).join('')")
+
+    def test_posts_once_in_the_posts_own_box_not_a_reply_box_or_another_post(self):
+        self.page(comments=[("Sam Lee", "Same question here!")], reply_label="Write a comment\u2026",
+                  others=[("John Roe", "Other post about essays"), ("Ann Poe", "A third post")])
+        result = self.post()
+        self.assertEqual(result.status, "commented", result.reason)
+        self.assertEqual(list(site.sent), [POST], "nothing went to a reply box or another post")
+        self.assertEqual(len(site.sent[POST]), 1, "posted once; the line break didn't post early")
+        self.assertEqual(messenger.squash(site.sent[POST][0]), messenger.squash(COMMENT))
+        self.assertEqual(self.pressed, [True])
+
+    def test_finds_the_box_just_after_the_article(self):
+        self.page(box="outside", others=[("John Roe", "Other post")])
+        self.assertEqual(self.post().status, "commented")
+        self.assertEqual(list(site.sent), [POST])
+
+    def test_comment_already_on_the_post_is_not_posted_again(self):
+        self.page()
+        site.sent[POST] = [COMMENT]
+        result = self.post()
+        self.assertEqual(result.status, "commented")
+        self.assertIn("already", result.reason)
+        self.assertEqual(site.sent[POST], [COMMENT])
+        self.assertEqual(self.pressed, [])
+
+    def test_block_dialog_stops_before_typing(self):
+        self.page(dialog="You're Temporarily Blocked. It looks like you were misusing this feature by going too fast.")
+        result = self.post()
+        self.assertEqual(result.status, "rate_limited", result.reason)
+        self.assertEqual((self.boxes(), self.pressed), ("", []))
+
+    def test_a_post_that_takes_no_comments_is_closed(self):
+        self.page(box="none", notice="Only members can comment on this post. Join group to participate.")
+        self.assertEqual(self.post().status, "closed")
+        self.assertEqual(self.pressed, [])
+
+    def test_someone_elses_post_is_not_typed_into(self):
+        self.page()
+        result = self.post(author="John Roe")
+        self.assertEqual(result.status, "not_submitted", result.reason)
+        self.assertEqual((self.boxes(), self.pressed), ("", []))
+
+    def test_failure_after_enter_is_uncertain(self):
+        self.page(mode="fail")
+        result = self.post()
+        self.assertEqual(result.status, "uncertain", result.reason)
+        self.assertEqual(self.pressed, [True])
+        self.assertNotIn(POST, site.sent)
+
+    def test_block_after_enter_is_uncertain_and_stops(self):
+        self.page(mode="block")
+        result = self.post()
+        self.assertEqual((result.status, result.stop), ("uncertain", "rate_limited"), result.reason)
+        self.assertEqual(self.pressed, [True])
+
+    def test_redirect_to_login_stops(self):
+        self.page()
+        site.redirects[POST] = "/login/"
+        site.pages["/login/"] = "<html><body><div>Log in to Facebook</div><input name=email><input name=pass></body></html>"
+        self.assertEqual(self.post().status, "login")
+
+    def test_a_held_comment_is_found_on_the_post(self):
+        self.page()
+        with self.assertRaises(RuntimeError):
+            comment.was_posted(driver, site.url(POST), COMMENT, AUTHOR, POST_TEXT[:comment.SNIPPET])
+        site.sent[POST] = [COMMENT]
+        self.assertTrue(comment.was_posted(driver, site.url(POST), COMMENT, AUTHOR, POST_TEXT[:comment.SNIPPET]))
+
+
+class ReadingReplies(MockChat):
+    def thread(self, **kw):
+        site.pages[PATH] = chat_page(site, "Jane Doe", **kw)
+        site.sent[PATH] = [TEXT]
+        messenger.open_chat(driver, site.url(PATH), "Jane Doe")
+        return messenger.thread(driver, "Jane Doe")
+
+    def test_a_reply_after_ours_counts(self):
+        rows = self.thread(after=[("them", "Yes please, how do I book?")])
+        self.assertEqual([r["who"] for r in rows], ["me", "them"])
+        self.assertEqual(replies.find_reply(rows, TEXT), "Yes please, how do I book?")
+
+    def test_only_our_message_is_not_a_reply(self):
+        self.assertIsNone(replies.find_reply(self.thread(), TEXT))
+
+    def test_their_message_before_our_dm_does_not_count(self):
+        rows = self.thread(before=[("them", "hey, saw you in the group")])
+        self.assertEqual([r["who"] for r in rows], ["them", "me"])
+        self.assertIsNone(replies.find_reply(rows, TEXT))
+
+    def test_without_labels_the_side_tells_them_apart(self):
+        rows = self.thread(before=[("them", "hi")], after=[("them", "thanks!")], labels=False)
+        self.assertEqual([(r["who"], r["label"]) for r in rows], [("them", ""), ("me", ""), ("them", "")])
+        self.assertEqual(replies.find_reply(rows, TEXT), "thanks!")
+
+    def test_a_date_row_is_nobodys(self):
+        rows = self.thread(after=[("mid", "Today 3:04 PM")])
+        self.assertEqual([r["who"] for r in rows], ["me", ""])
+        self.assertIsNone(replies.find_reply(rows, TEXT))
 
 
 if __name__ == "__main__":

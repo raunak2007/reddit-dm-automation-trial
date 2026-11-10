@@ -6,7 +6,8 @@ Opens the post in the logged-in Chrome profile and pages through its comments wi
 the Instagram page itself uses (so you get usernames, display names and full comment text), falling back
 to reading the page if that endpoint doesn't answer. The post's owner, your own account and repeat
 commenters are dropped. Results are merged into data/leads.json, tagged with the post. Nothing is
-followed, liked or sent.
+followed, liked or sent. If Instagram logs the profile out, asks for a security check or rate-limits it, it
+stops at once with exit code 2. discover.py (python run.py) calls read_post for each recent post.
 """
 from __future__ import annotations
 
@@ -18,7 +19,9 @@ from datetime import datetime
 from pathlib import Path
 
 import browser
+import direct
 import store
+from send_dm import AccountBlocked
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.json"
@@ -95,13 +98,22 @@ def owner(driver) -> str | None:
       return h ? h.getAttribute('href').replaceAll('/', '') : null;""")
 
 
-def _api(driver, path: str) -> dict | None:
+def api(driver, path: str) -> dict | None:
+    """GET https://www.instagram.com/api/v1/<path> from inside the logged-in page (the page must be on
+    instagram.com), with the session's own cookies. The parsed JSON, or None if the endpoint didn't answer
+    usefully. Raises send_dm.AccountBlocked if Instagram is refusing the account (logged out, a challenge or
+    checkpoint, rate-limited or action-blocked), the same signal send.py stops on. Only ever reads: nothing
+    here is a POST, so nothing is liked, followed or marked seen."""
     r = driver.execute_async_script(_FETCH, f"https://www.instagram.com/api/v1/{path}", APP_ID)
-    if r["status"] in (401, 403) or (r["status"] != 200 and "login" in r["body"][:300].lower()):
-        raise RuntimeError("Instagram says this profile isn't logged in (run: python run.py login)")
-    if r["status"] == 429 or "please wait a few minutes" in r["body"].lower():
-        raise RuntimeError("Instagram is rate-limiting this account; stop for today")
-    if r["status"] != 200:
+    status, head = r["status"], r["body"][:600].lower()
+    if status in (401, 403) or (status != 200 and "login" in head[:300]) or '"require_login":true' in head:
+        raise AccountBlocked("Instagram says this profile isn't logged in (run: python run.py login)", "login")
+    if "checkpoint_required" in head or "challenge_required" in head:
+        raise AccountBlocked("Instagram wants a security check (challenge) on this account; open it in the "
+                             "browser and clear it before running again", "restricted")
+    if status == 429 or "please wait a few minutes" in head or "feedback_required" in head:
+        raise AccountBlocked("Instagram is rate-limiting this account; stop for today", "rate_limited")
+    if status != 200:
         return None
     try:
         return json.loads(r["body"])
@@ -122,7 +134,7 @@ def via_api(driver, mid: str, cfg: dict) -> list[dict] | None:
     rows, cursor = [], None
     while len(rows) < ig["max_comments"]:
         q = "can_support_threading=true&permalink_enabled=false" + (f"&min_id={cursor}" if cursor else "")
-        data = _api(driver, f"media/{mid}/comments/?{q}")
+        data = api(driver, f"media/{mid}/comments/?{q}")
         if data is None:
             return rows or None
         for c in data.get("comments", []):
@@ -142,7 +154,7 @@ def via_api(driver, mid: str, cfg: dict) -> list[dict] | None:
 def replies(driver, mid: str, cid: str) -> list[dict]:
     out, cursor = [], None
     for _ in range(10):
-        data = _api(driver, f"media/{mid}/comments/{cid}/child_comments/" + (f"?max_id={cursor}" if cursor else ""))
+        data = api(driver, f"media/{mid}/comments/{cid}/child_comments/" + (f"?max_id={cursor}" if cursor else ""))
         if not data:
             break
         out += [_row(c, cid) for c in data.get("child_comments", [])]
@@ -167,24 +179,20 @@ def via_page(driver, cfg: dict) -> list[dict]:
             for r in driver.execute_script(_DOM)]
 
 
-def run(cfg: dict, url: str) -> int:
+def read_post(driver, cfg: dict, url: str) -> dict:
+    """Read one post's commenters with a driver that is already logged in, and merge them into data/leads.json.
+    Raises AccountBlocked (stop everything) if Instagram refuses the account. Returns what it found:
+    {"shortcode", "owner", "comments", "commenters", "new", "how"}."""
     code = shortcode(url)
-    driver = browser.make_driver(cfg)
-    try:
-        browser.ensure_logged_in(driver, cfg)
-        driver.get(f"https://www.instagram.com/p/{code}/")
-        browser.pause(cfg)
-        post_owner = owner(driver)
-        try:
-            rows = via_api(driver, media_id(driver, code), cfg)
-            how = "Instagram's comments endpoint"
-            if rows is None:
-                print("[!] The comments endpoint didn't answer; reading the page instead (slower, no display names)")
-                rows, how = via_page(driver, cfg), "the page"
-        except RuntimeError as exc:
-            sys.exit(f"[stopped] {exc}")
-    finally:
-        driver.quit()
+    driver.get(f"https://www.instagram.com/p/{code}/")
+    browser.pause(cfg)
+    direct.check_account(driver)
+    post_owner = owner(driver)
+    rows = via_api(driver, media_id(driver, code), cfg)
+    how = "Instagram's comments endpoint"
+    if rows is None:
+        print("[!] The comments endpoint didn't answer; reading the page instead (slower, no display names)")
+        rows, how = via_page(driver, cfg), "the page"
 
     skip = {(post_owner or "").lower(), cfg["instagram"]["my_username"].lower(), ""}
     by_user = {}                                       # one lead per commenter, all their comments together
@@ -208,10 +216,29 @@ def run(cfg: dict, url: str) -> int:
         leads[key].update(r)
     store.save_leads(leads)
     print(f"[done] {len(rows)} comments from {how}; {len(by_user)} commenters, {new} new (post by @{post_owner})")
-    return new
+    return {"shortcode": code, "owner": post_owner, "comments": len(rows), "commenters": len(by_user), "new": new,
+            "how": how}
+
+
+def run(cfg: dict, url: str) -> int:
+    """Read one post in its own browser session. Exits with code 2 (browser.Halt) if Instagram refuses the
+    account. Returns how many new commenters it found."""
+    shortcode(url)                                     # a bad link stops before Chrome opens
+    driver = browser.make_driver(cfg)
+    try:
+        browser.ensure_logged_in(driver, cfg, interactive=sys.stdin.isatty())
+        return read_post(driver, cfg, url)["new"]
+    except AccountBlocked as exc:
+        raise browser.Halt(f"{exc} ({exc.kind})")
+    finally:
+        driver.quit()
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit("usage: python comments.py <instagram post or reel link>")
-    run(json.loads(CONFIG.read_text()), sys.argv[1])
+    try:
+        run(json.loads(CONFIG.read_text()), sys.argv[1])
+    except browser.Halt as stop:
+        print(f"[stopped] {stop}")
+        sys.exit(2)

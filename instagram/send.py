@@ -95,7 +95,8 @@ def why_not(lead, cfg, max_attempts):
 
 def prepare(driver, cfg, interactive=False):
     """Start of every run, before any chat is opened: confirm the browser is logged in as
-    outreach.sender_user_id and the inbox is usable. Exits on any problem. Returns the sender's id."""
+    outreach.sender_user_id and the inbox is usable. Exits on any problem (code 2, browser.Halt, if Instagram is
+    refusing the account: logged out, challenge, block). Returns the sender's id."""
     browser.ensure_logged_in(driver, cfg, interactive=interactive)
     me = (driver.get_cookie("ds_user_id") or {}).get("value")
     expected = str(cfg["outreach"].get("sender_user_id") or "").strip()
@@ -115,7 +116,7 @@ def prepare(driver, cfg, interactive=False):
     try:
         direct.check_account(driver)
     except AccountBlocked as exc:
-        raise SystemExit(f"Not sending ({exc.kind}): {exc}")
+        raise browser.Halt(f"Not sending ({exc.kind}): {exc}")
     print(f"[+] sending as Instagram user {me} (@{cfg['instagram']['my_username']})")
     return me
 
@@ -371,7 +372,11 @@ def main():
     elif args.list_only:
         print_list(approved_leads(), cfg)
     else:
-        sys.exit(run(cfg, args.by_hand))
+        try:
+            sys.exit(run(cfg, args.by_hand))
+        except browser.Halt as stop:
+            print(f"[stopped] {stop}")
+            sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -65,7 +65,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 <div id="toast" role="status"></div>
 <script>
 const TABS = [["todo", "To review"], ["approved", "Approved"], ["done", "Done"], ["low", "Low score"], ["all", "All"]];
-const DONE = new Set(["sent", "commented", "skipped", "not_relevant", "already_contacted", "recipient"]);
+const DONE = new Set(["sent", "commented", "comment_held", "comment_closed", "skipped", "not_relevant", "already_contacted", "recipient"]);
 const SENDING = new Set(["approved", "held", "gave_up"]);
 const LABEL = { sent: "DM sent", commented: "Commented", skipped: "Skipped", not_relevant: "Marked not relevant",
                 already_contacted: "Already contacted via another post", low: "Below the score cutoff",
@@ -73,6 +73,8 @@ const LABEL = { sent: "DM sent", commented: "Commented", skipped: "Skipped", not
                 unapproved: "Back in To review",
                 held: "HELD: a send may have gone out. The next send run checks the chat and settles it",
                 gave_up: "Not sent: gave up after repeated failed attempts",
+                comment_held: "HELD: the automatic comment may have been posted. The next comment run checks the post",
+                comment_closed: "The post doesn't take comments from this account",
                 recipient: "Facebook says this person isn't available" };
 const tabHas = (k, l) => k === "all" || (k === "done" ? DONE.has(l.status) : k === "approved" ? SENDING.has(l.status) : l.status === k);
 let data = { leads: [] }, tab = "todo";

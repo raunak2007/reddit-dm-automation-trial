@@ -27,6 +27,19 @@
     "include_replies": true
   },
 
+  "discover": {
+    "lookback_days": 7,
+    "max_posts": 6,
+    "accounts": [],
+    "posts": [],
+    "skip_unchanged": true
+  },
+
+  "replies": {
+    "max_pages": 10,
+    "messages_per_chat": 20
+  },
+
   "outreach": {
     "auto_approve": true,
     "auto_resolve": true,

@@ -94,9 +94,9 @@ def target(lead):
     return store.messenger_url(lead["author_key"]), lead["approved"]["dm"], lead.get("author") or lead["author_key"]
 
 
-def prepare(driver, cfg, interactive=False):
-    """Start of every run, before any chat is opened: confirm the browser is logged in as
-    outreach.sender_user_id and Messenger is usable. Exits on any problem. Returns the sender's id."""
+def check_sender(driver, cfg, interactive=False):
+    """Open facebook.com and confirm the browser is logged in as outreach.sender_user_id (comment.py and replies.py
+    start with this too). Exits on any problem. Returns the sender's id."""
     browser.ensure_logged_in(driver, cfg, interactive=interactive)
     me = (driver.get_cookie("c_user") or {}).get("value")
     expected = str(cfg["outreach"].get("sender_user_id") or "").strip()
@@ -109,18 +109,25 @@ def prepare(driver, cfg, interactive=False):
     if me != expected:
         raise SystemExit(f"Logged in as Facebook user {me}, but config.json's outreach.sender_user_id is {expected}; "
                          f"not sending.")
+    return me
+
+
+def prepare(driver, cfg, interactive=False):
+    """Start of every run, before any chat is opened: confirm the browser is logged in as
+    outreach.sender_user_id and Messenger is usable. Exits on any problem. Returns the sender's id."""
+    me = check_sender(driver, cfg, interactive)
     driver.get(messenger.INBOX)
     browser.pause(cfg, 0.6)
     if messenger.js(driver, "notice", messenger.PIN):
         if not interactive:
-            raise SystemExit("Messenger is asking for this account's chat PIN (end-to-end encrypted chats). Enter "
+            raise browser.Halt("Messenger is asking for this account's chat PIN (end-to-end encrypted chats). Enter "
                              "it once with python send.py --by-hand, then run again.")
         print("[!] Messenger is asking for this account's chat PIN (end-to-end encrypted chats).")
         input("    Enter it in the Chrome window, then press Enter here... ")
     try:
         messenger.check_account(driver)
     except AccountBlocked as exc:
-        raise SystemExit(f"Not sending ({exc.kind}): {exc}")
+        raise browser.Halt(f"Not sending ({exc.kind}): {exc}")
     print(f"[+] sending as Facebook user {me}")
     return me
 
@@ -360,4 +367,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    browser.halting(main)

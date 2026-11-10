@@ -6,7 +6,11 @@ that none of its block/PIN patterns fire on ordinary pages.
     cd facebook
     FB_LIVE=1 ../venv/bin/python -m unittest tests/test_live.py -v
     FB_LIVE=1 FB_LIVE_CHAT=<author_key> FB_LIVE_NAME="Jane Doe" ../venv/bin/python -m unittest tests/test_live.py -v
-                                    also open that chat (someone you've messaged before) and check its box
+                                    also open that chat (someone you've messaged before), check its box, and
+                                    print who messenger.thread thinks wrote each message (check it by eye)
+    FB_LIVE=1 FB_LIVE_POST=<post url> FB_LIVE_POST_AUTHOR="Jane Doe" FB_LIVE_POST_TEXT="first words of the post" \
+        ../venv/bin/python -m unittest tests/test_live.py -v
+                                    also open that post and check comment.py finds exactly its own comment box
 
 Close send.py / run.py first: Chrome won't open the same profile twice. A failed check saves its screenshot and
 page listing (step*_failed.png / _dom.txt) in debug/live/; when the markup changed, copy it into mock_site.py so
@@ -21,12 +25,15 @@ import unittest
 import helpers  # noqa: F401  (puts the facebook folder on sys.path)
 
 import browser
+import comment
 import messenger
 import store
 from send_dm import step
 
 LIVE = os.environ.get("FB_LIVE") == "1"
 CHAT, NAME = os.environ.get("FB_LIVE_CHAT", ""), os.environ.get("FB_LIVE_NAME", "")
+POST, POST_AUTHOR = os.environ.get("FB_LIVE_POST", ""), os.environ.get("FB_LIVE_POST_AUTHOR", "")
+POST_TEXT = os.environ.get("FB_LIVE_POST_TEXT", "")
 OUT = helpers.FOLDER / "debug" / "live"
 cfg = driver = None
 
@@ -82,6 +89,25 @@ class LiveFacebook(unittest.TestCase):
             self.assertEqual(messenger.squash(messenger.sdm(driver, "read", box)), "",
                              "the box already holds a draft; clear it before a run")
             print(f"\n    Send buttons found: {len(messenger.js(driver, 'send'))} (0 means Enter is used)")
+
+    @unittest.skipUnless(CHAT and NAME, "set FB_LIVE_CHAT and FB_LIVE_NAME to read one chat's messages")
+    def test_a_chat_tells_their_messages_from_ours(self):
+        with step(driver, "live_rows", f"reading who wrote each message with {NAME} (nothing is typed)"):
+            messenger.open_chat(driver, store.messenger_url(CHAT), NAME)
+            rows = messenger.thread(driver, NAME)
+            self.assertTrue(rows, "no [role=row] messages found: update rows in messenger._JS")
+            print()
+            for r in rows[-15:]:
+                print(f"    {r['who'] or '?':<4} label={r['label'][:20]!r:<24} side={r['side'] or '-':<4} {r['text'][:60]!r}")
+            self.assertTrue(any(r["who"] == "me" for r in rows), "none of the messages read as ours")
+
+    @unittest.skipUnless(POST and POST_AUTHOR and POST_TEXT, "set FB_LIVE_POST, FB_LIVE_POST_AUTHOR and "
+                                                             "FB_LIVE_POST_TEXT to check one post's comment box")
+    def test_a_post_shows_exactly_its_own_comment_box(self):
+        with step(driver, "live_post", f"finding {POST_AUTHOR}'s post and its comment box (nothing is typed)"):
+            box = comment.open_post(driver, POST, POST_AUTHOR, POST_TEXT[:comment.SNIPPET])
+            self.assertEqual(messenger.squash(messenger.sdm(driver, "read", box)), "", "the box already holds a draft")
+            print(f"\n    comment box: aria-label={box.get_attribute('aria-label')!r}")
 
 
 if __name__ == "__main__":

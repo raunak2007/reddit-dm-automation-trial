@@ -55,6 +55,14 @@
     "max_delay_seconds": 180,
     "max_attempts_per_recipient": 3,
     "minor_policy": "comment_only",
+    "auto_comment": false,
+    "auto_comment_minors": false,
+    "daily_comment_limit": 10,
+    "comment_min_delay_seconds": 90,
+    "comment_max_delay_seconds": 240,
+    "replies_per_run": 30,
+    "reply_min_delay_seconds": 20,
+    "reply_max_delay_seconds": 60,
     "queue_port": 8765
   },
 

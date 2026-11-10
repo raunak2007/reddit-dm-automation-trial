@@ -3,9 +3,10 @@
 StoreTest   each test gets an empty data/ folder of its own (store.py's paths point into a temp dir) and runs in
             that dir, so failed-step screenshots and DOM listings land there instead of in the repo
 config()    config.json's shape with every delay at 0
-FakeChrome  a stand-in driver that answers messenger.py's page helpers (notice, composer, has) from a dict of
-            pages: {url: {"text": what the page says, "composer": True, "redirect": url}}. It runs the real
-            patterns in messenger.py against that text, so a test shows what send.py does when Facebook shows it.
+FakeChrome  a stand-in driver that answers messenger.py's page helpers (notice, composer, has, rows) from a dict
+            of pages: {url: {"text": what the page says, "composer": True, "redirect": url, "rows": [message rows]}}.
+            It runs the real patterns in messenger.py against that text, so a test shows what send.py does when
+            Facebook shows it.
 """
 from __future__ import annotations
 
@@ -30,7 +31,10 @@ SENDER = "100"
 def config(**outreach):
     cfg = {"outreach": {"auto_approve": False, "auto_resolve": True, "sender_user_id": SENDER,
                         "daily_dm_limit": 20, "min_delay_seconds": 0, "max_delay_seconds": 0,
-                        "max_attempts_per_recipient": 3, "minor_policy": "comment_only"},
+                        "max_attempts_per_recipient": 3, "minor_policy": "comment_only",
+                        "auto_comment": False, "auto_comment_minors": False, "daily_comment_limit": 10,
+                        "comment_min_delay_seconds": 0, "comment_max_delay_seconds": 0, "replies_per_run": 30,
+                        "reply_min_delay_seconds": 0, "reply_max_delay_seconds": 0},
            "ai": {"min_score": 60},
            "browser": {"profile": "test", "user_data_dir": "", "min_page_delay_seconds": 0,
                        "max_page_delay_seconds": 0}}
@@ -88,6 +92,8 @@ class FakeChrome:
             return squash(args[0]) in squash(text)
         if fn in ("send", "buttons"):
             return []
+        if fn == "rows":
+            return page.get("rows", [])
         return ""                                  # center, dump, ...
 
     def get_cookie(self, name):
@@ -115,6 +121,7 @@ class StoreTest(unittest.TestCase):
         self.tmp = Path(tmp.name)
         data = self.tmp / "data"
         for name, value in (("DATA", data), ("LEADS", data / "leads.json"), ("CONTACTED", data / "contacted.csv"),
+                            ("REPLIES", data / "replies.csv"),
                             ("LOCK", data / "send.lock")):
             self.patch(store, name, value)
         cwd = os.getcwd()

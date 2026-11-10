@@ -23,11 +23,17 @@ data/contacted.csv   one row per event: username, lead_key, status, timestamp, n
                          cleared        a held send checked and found not to have gone out (send.py does this
                                         at the start of each run, or `send.py resolve ... --not-sent`)
 
+data/posts.json      {"<shortcode>": {"url", "owner", "taken_at", "comment_count", "first_seen", "last_read",
+                     "reads", "commenters", "source"}}: the posts discover.py found and when each was last read.
+data/replies.csv     one row per message someone sent back after our DM (replies.py): username, item_id,
+                     replied_at, snippet, thread_url, sent_at, found_at, how. One row per item_id.
+
 From that history, as ledger.py does for Reddit:
     sent_today()       people DMed (or possibly DMed) since local midnight, across every run and by hand
     skip_reason(u)     why u must not be DMed now: already sent / no such account -> never; last attempt
                        uncertain or interrupted -> held; max attempts failed -> given up
-    lock()             one send.py run at a time
+    lock()             one run at a time on the Chrome profile (send.py, and run.py reading posts or replies)
+    sent_at()          {username: when our DM went out}, for everyone recorded 'sent'
 """
 from __future__ import annotations
 
@@ -45,6 +51,9 @@ DATA = HERE / "data"
 LEADS = DATA / "leads.json"
 CONTACTED = DATA / "contacted.csv"
 LOCK = DATA / "send.lock"
+POSTS = DATA / "posts.json"
+REPLIES = DATA / "replies.csv"
+REPLY_FIELDS = ["username", "item_id", "replied_at", "snippet", "thread_url", "sent_at", "found_at", "how"]
 FIELDS = ["username", "lead_key", "status", "timestamp", "note"]
 QUEUE_STATUSES = ("approved", "unapproved", "sent", "skipped", "not_relevant")
 SEND_STATUSES = ("submitting", "uncertain", "refused", "recipient", "not_submitted", "cleared",
@@ -66,13 +75,51 @@ def load_leads() -> dict:
     return json.loads(LEADS.read_text()) if LEADS.exists() else {}
 
 
-def save_leads(leads: dict) -> None:
-    """Write via a temp file so a crash mid-write can't leave half a leads.json."""
+def _save_json(path: Path, value) -> None:
+    """Write via a temp file so a crash mid-write can't leave half a file."""
     DATA.mkdir(exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=DATA, suffix=".tmp")
     with os.fdopen(fd, "w") as f:
-        json.dump(leads, f, indent=1, ensure_ascii=False)
-    os.replace(tmp, LEADS)
+        json.dump(value, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def save_leads(leads: dict) -> None:
+    _save_json(LEADS, leads)
+
+
+def load_posts() -> dict:
+    return json.loads(POSTS.read_text()) if POSTS.exists() else {}
+
+
+def save_posts(posts: dict) -> None:
+    _save_json(POSTS, posts)
+
+
+def load_replies() -> list[dict]:
+    if not REPLIES.exists():
+        return []
+    with open(REPLIES, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def add_replies(rows: list[dict]) -> list[dict]:
+    """Append the replies whose item_id isn't in data/replies.csv yet; returns the ones added."""
+    seen = {r["item_id"] for r in load_replies()}
+    fresh = []
+    for r in rows:
+        if r["item_id"] not in seen:
+            seen.add(r["item_id"])
+            fresh.append(r)
+    if fresh:
+        DATA.mkdir(exist_ok=True)
+        new = not REPLIES.exists()
+        with open(REPLIES, "a", newline="") as f:
+            w = csv.DictWriter(f, REPLY_FIELDS)
+            if new:
+                w.writeheader()
+            w.writerows({k: r.get(k, "") for k in REPLY_FIELDS} for r in fresh)
+    return fresh
 
 
 def _rows() -> list[dict]:
@@ -100,13 +147,15 @@ def record(username: str, key: str, status: str, note: str = "") -> None:
 
 @contextmanager
 def lock():
-    """Hold an exclusive lock for a whole send.py run so two runs can't send (or double-send) at once."""
+    """Hold an exclusive lock for a whole send.py run so two runs can't send (or double-send) at once. run.py also
+    holds it while it reads posts or the inbox, since those use the same Chrome profile."""
     DATA.mkdir(exist_ok=True)
     with open(LOCK, "w") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise SystemExit("Another send.py is already running; not starting a second one.")
+            raise SystemExit("Another send.py (or run.py reading posts or replies) is already using this Instagram "
+                             "profile; not starting a second one.")
         f.write(f"{datetime.now().isoformat(timespec='seconds')}\n")
         f.flush()
         try:
@@ -127,6 +176,13 @@ def messaged(hist: dict | None = None) -> set[str]:
     """People never to be offered again: sent, no such account, or a send that may have gone out."""
     hist = history() if hist is None else hist
     return {u for u, rows in hist.items() if any(r["status"] in FINAL for r in rows) or rows[-1]["status"] in HELD}
+
+
+def sent_at(hist: dict | None = None) -> dict[str, str]:
+    """{username: timestamp of their first 'sent' row}: when our DM went out (or was marked sent by hand)."""
+    hist = history() if hist is None else hist
+    return {u: next(r["timestamp"] for r in rows if r["status"] == "sent")
+            for u, rows in hist.items() if any(r["status"] == "sent" for r in rows)}
 
 
 def handled() -> dict[str, str]:

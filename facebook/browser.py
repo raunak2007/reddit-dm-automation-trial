@@ -55,6 +55,27 @@ def logged_in(driver) -> bool:
     return "/login" not in driver.current_url and not any(s in text for s in LOGGED_OUT)
 
 
+class Halt(SystemExit):
+    """An account-wide stop (logged out, chat PIN, checkpoint, block): exits with code 2, so a scheduler (daily.py)
+    can tell it from an ordinary failure (1). str() is the reason; main() in each entry point prints it."""
+
+    def __init__(self, why: str):
+        super().__init__(2)
+        self.why = why
+
+    def __str__(self):
+        return self.why
+
+
+def halting(main):
+    """Run an entry point's main(), printing a Halt's reason before exiting 2 (python itself wouldn't)."""
+    try:
+        return main()
+    except Halt as stop:
+        print(f"[stopped] {stop}")
+        raise
+
+
 def ensure_logged_in(driver, cfg: dict, interactive: bool = True):
     """Open facebook.com; if it shows the login page, wait for you to log in in the window."""
     driver.get("https://www.facebook.com/")
@@ -62,10 +83,10 @@ def ensure_logged_in(driver, cfg: dict, interactive: bool = True):
     if logged_in(driver):
         return
     if not interactive:
-        sys.exit("Not logged in to Facebook in this profile. Run: python run.py login")
+        raise Halt("Not logged in to Facebook in this profile. Run: python run.py login")
     print("[!] Not logged in. Log in to Facebook in the Chrome window (including any 2FA / checkpoint).")
     input("    Press Enter here once your News Feed is showing... ")
     driver.get("https://www.facebook.com/")
     pause(cfg, 0.6)
     if not logged_in(driver):
-        sys.exit("Still not logged in; stopping.")
+        raise Halt("Still not logged in; stopping.")
