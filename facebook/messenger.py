@@ -11,9 +11,11 @@ or call it with any logged-in driver:
 
 send_message opens the chat, checks that it is a chat with `name`, that Facebook isn't refusing this account
 or this person, and that the message isn't already in the chat; types the message, presses Send once, waits
-for the message box to clear, then reloads the chat and confirms the message is in it.
+for the message box to clear and records it as sent: like ApplyTwin logging "Applied" after Submit, it
+doesn't go back and look for it. verify=True (outreach.verify_after_send) also reloads the chat and
+confirms the message is in it.
 
-Returns a send_dm.Result, truthy only once the message is confirmed in the chat, with the same statuses:
+Returns a send_dm.Result, truthy once Messenger has taken the message, with the same statuses:
     'sent', 'recipient' (Facebook says the person isn't available), 'refused' (Facebook won't let this
     account message them and doesn't say why), 'login' / 'rate_limited' / 'restricted' (account-wide: stop),
     'invalid', 'not_submitted' (failed before Send: safe to retry), 'uncertain' (Send was pressed but the
@@ -274,12 +276,15 @@ def open_for_hand(driver, chat_url, text, name):
     return None
 
 
-def confirm_by_hand(driver, chat_url, text, name):
-    """After you say you pressed Send: 'sent' if the message is in the chat after reloading it, Facebook's own
-    answer if the chat shows one, else 'uncertain'."""
+def confirm_by_hand(driver, chat_url, text, name, verify=False):
+    """After you say you pressed Send: Messenger's own answer if the chat shows one, else 'sent' (you pressed
+    it, so it isn't looked for). verify=True: 'sent' only if the message is in the reloaded chat, else
+    'uncertain'."""
     said = page_says(driver, name)
     if said is not None:
         return said
+    if not verify:
+        return Result("sent", "messenger (by hand): you pressed Send (not checked in the chat)")
     print("    reloading the chat to look for it...")
     try:
         verify_in_chat(driver, chat_url, text, timeout=30)
@@ -292,8 +297,9 @@ def confirm_by_hand(driver, chat_url, text, name):
 
 
 # ----------------------------------------------------------------- the whole send
-def send_message(driver, chat_url, text, name, *, before_submit=None):
-    """Open the chat, check it, type the message, press Send once and confirm it in the reloaded chat.
+def send_message(driver, chat_url, text, name, *, before_submit=None, verify=False):
+    """Open the chat, check it, type the message, press Send once and wait for Messenger to take it.
+    verify=True: also reload the chat and confirm the message is in it (outreach.verify_after_send).
     before_submit(): called right before Send is pressed (send.py uses it to note a send is in flight)."""
     if not CHAT_URL.match(chat_url or "") or not text.strip() or not (name or "").strip():
         print(f"[!] not sending: needs a {FB}/messages/t/<id> link, a message and the person's name")
@@ -318,8 +324,9 @@ def send_message(driver, chat_url, text, name, *, before_submit=None):
             failed_before = submit(driver, box, name, about_to_click)
         with step(driver, "step4_confirm", "waiting for Messenger to take the message"):
             confirm(driver, failed_before, name)
-        with step(driver, "step5_verify", "reloading the chat to look for the message"):
-            verify_in_chat(driver, chat_url, text)
+        if verify:
+            with step(driver, "step5_verify", "reloading the chat to look for the message"):
+                verify_in_chat(driver, chat_url, text)
     except StepFailed as exc:
         if exc.kind != "error":                   # Facebook said what went wrong: not delivered
             return Result(exc.kind, f"messenger: {exc}")
@@ -331,8 +338,11 @@ def send_message(driver, chat_url, text, name, *, before_submit=None):
             return Result("sent", f"messenger: confirmed in the chat after: {exc}")
         except Exception as check_error:
             return Result("uncertain", f"messenger: Send was pressed; {exc}; chat check: {check_error}")
-    print(f"[done] message to {name} is in the chat")
-    return Result("sent", "messenger: confirmed in the chat")
+    if verify:
+        print(f"[done] message to {name} is in the chat")
+        return Result("sent", "messenger: confirmed in the chat")
+    print(f"[done] message to {name} sent")
+    return Result("sent", "messenger: Send pressed and Messenger took it (not checked in the chat)")
 
 
 # ----------------------------------------------------------------- run directly

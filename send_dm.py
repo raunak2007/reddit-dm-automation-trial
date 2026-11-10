@@ -11,8 +11,9 @@ or call it from your own code with any logged-in driver:
     ok = send_compose(driver, "https://www.reddit.com/message/compose/?to=...&subject=...&message=...")
 
 send_dm builds the same compose link a queue file contains and hands it to send_compose, which
-opens it, checks that Reddit prefilled the recipient, title and message, clicks Send once, waits
-for Reddit to accept it and confirms it in the sent folder. Nothing here uses /chat/ or searches
+opens it, checks that Reddit prefilled the recipient, title and message, clicks Send once and waits
+for Reddit to accept it. It doesn't then look for it in the sent folder (like ApplyTwin logging
+"Applied" after Submit); verify=True (config.json "verify_after_send") does. Nothing here uses /chat/ or searches
 for recipients: the recipient comes from the link's ?to=, exactly as the queue page has it.
 
 Returns a Result that is truthy once Reddit accepts the message. On failure it prints the step
@@ -281,7 +282,7 @@ class StepFailed(RuntimeError):
 class Result:
     """What happened to one send. Truthy only when the message was sent.
     status:
-      'sent'           confirmed: the message is in this account's sent folder, to that recipient
+      'sent'           Reddit accepted it (with verify=True: it is in this account's sent folder)
       'recipient'      Reddit says there is no such user
       'refused'        Reddit refused without saying whether the recipient or this account is the cause
       'login'          not logged in, or logged in as the wrong account            } account-wide:
@@ -649,9 +650,10 @@ def confirm_compose(driver, form, alerts_before, username):
     print(f"    {how}")
 
 
-def send_compose(driver, link, *, sender=None, before_submit=None):
+def send_compose(driver, link, *, sender=None, before_submit=None, verify=False):
     """Open a /message/compose/ link exactly as given (as found in a queue file), check the prefilled
-    fields, click Send once, then confirm the message is in this account's sent folder.
+    fields, click Send once and wait for Reddit to accept it. verify=True: also confirm the message is in this
+    account's sent folder.
     sender: expected author for that check. before_submit(): called right before Send is clicked
     (the ledger uses it to note that a submission is in flight)."""
     try:
@@ -680,8 +682,9 @@ def send_compose(driver, link, *, sender=None, before_submit=None):
             alerts = submit_compose(driver, form, want["to"], about_to_click)
         with step(driver, "step4_confirm", "waiting for Reddit to accept the message"):
             confirm_compose(driver, form, alerts, want["to"])
-        with step(driver, "step5_verify", "looking for the message in this account's sent folder"):
-            verify_in_sent(driver, want, clicked["at"], sender)
+        if verify:
+            with step(driver, "step5_verify", "looking for the message in this account's sent folder"):
+                verify_in_sent(driver, want, clicked["at"], sender)
     except StepFailed as exc:
         if exc.kind != "error":                          # Reddit said what went wrong: not delivered
             return Result(exc.kind, f"compose: {exc}")
@@ -694,18 +697,21 @@ def send_compose(driver, link, *, sender=None, before_submit=None):
         except Exception as check_error:
             exc = f"{exc}; sent folder unreadable: {check_error}"
         return Result("uncertain", f"compose: Send was clicked; {exc}")
-    print(f"[done] message to {want['to']} is in the sent folder")
-    return Result("sent", "compose: confirmed in the sent folder")
+    if verify:
+        print(f"[done] message to {want['to']} is in the sent folder")
+        return Result("sent", "compose: confirmed in the sent folder")
+    print(f"[done] message to {want['to']} sent")
+    return Result("sent", "compose: Send clicked and Reddit accepted it (not checked in the sent folder)")
 
 
 # ----------------------------------------------------------------- entry point
-def send_dm(driver, username, message, *, subject=DEFAULT_SUBJECT, sender=None, before_submit=None):
+def send_dm(driver, username, message, *, subject=DEFAULT_SUBJECT, sender=None, before_submit=None, verify=False):
     try:
         link = compose_link(username, message, subject)
     except ValueError as exc:
         print(f"[!] not sending: {exc}")
         return Result("invalid", f"compose: {exc}")
-    return send_compose(driver, link, sender=sender, before_submit=before_submit)
+    return send_compose(driver, link, sender=sender, before_submit=before_submit, verify=verify)
 
 
 # ----------------------------------------------------------------- run directly

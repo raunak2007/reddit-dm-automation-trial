@@ -26,12 +26,16 @@ pip install undetected-chromedriver selenium python-dotenv
 python chrome_version.py
 ```
 
+Sends are recorded `sent` as soon as Reddit accepts them, without looking for them in the sent folder
+afterwards (the way ApplyTwin logs "Applied" right after Submit). `open_queue.py` trusts your `[s]ent` the same
+way. Set `"verify_after_send": true` in `config.json` to check the sent folder first, as before.
+
 ## Facebook lead finder (`facebook/`)
 
 `facebook/` finds recent Facebook posts from students and parents who need admissions help. Claude scores
 each post and drafts a message, and `facebook/send.py` sends them through Messenger on its own, like
 `run_loop.py` (no approving or pressing Send; set `outreach.auto_approve` to `false` to review first). It follows the same rules as the Reddit scripts here: sender
-check, one send per person, confirmation after sending, held uncertain sends, a daily cap, and stops on
+check, one send per person, recorded as sent once the site takes it (no checking afterwards), held uncertain sends, a daily cap, and stops on
 account-wide problems. It shares this folder's `chrome_version.py` and `send_dm.py` helpers. Setup and
 use: [facebook/README.md](facebook/README.md).
 
@@ -40,6 +44,6 @@ use: [facebook/README.md](facebook/README.md).
 `instagram/` reads everyone who commented on an Instagram post or reel. Claude picks out the ones asking
 about admissions and writes each a short, casual DM, and `instagram/send.py` sends them on its own, like
 `run_loop.py` (no approving or pressing Send; set `outreach.auto_approve` to `false` to review first). It follows the same rules as the Reddit scripts here: sender
-check, one send per person, confirmation after sending, held uncertain sends, a daily cap, and stops on
+check, one send per person, recorded as sent once the site takes it (no checking afterwards), held uncertain sends, a daily cap, and stops on
 account-wide problems. It shares this folder's `chrome_version.py` and `send_dm.py` helpers. Setup and
 use: [instagram/README.md](instagram/README.md).

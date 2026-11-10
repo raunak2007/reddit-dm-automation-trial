@@ -29,7 +29,7 @@ admissions are under 18, and those authors are never DMed by default.
 | queue `.html` you curate | every new lead (`outreach.auto_approve`), or the ones you **Approve for sending** |
 | `run_loop.py` (presses Send) / `open_queue.py` (you click Send) | `send.py` / `send.py --by-hand` |
 | `sender_username`, checked via `/api/me` | `outreach.sender_user_id`, checked via the `c_user` cookie |
-| confirmed in the sent folder | confirmed in the chat after reloading it |
+| recorded once Reddit accepts it | recorded once the message box clears (no reload) |
 | `contacted.csv`: `submitting`, `uncertain` = held | `data/contacted.csv`: the same statuses |
 | `python ledger.py held` / `resolve` | `python send.py held` / `resolve` |
 
@@ -113,10 +113,11 @@ For each approved lead, best score first, `send.py`:
    person, and that the message isn't already there (if it is, it's recorded as sent and not sent again).
 2. Types the approved text. Line breaks use Shift+Enter, so nothing goes out early.
 3. Writes a `submitting` row to `data/contacted.csv`, then presses Send **once**.
-4. Waits for the message box to clear, reloads the chat, and records `sent` only once the message
-   is in it.
+4. Waits for the message box to clear with no error, and records `sent` right away. It doesn't reload
+   the chat to look for the message (the way ApplyTwin logs "Applied" right after Submit). `--by-hand` trusts
+   your `[s]ent` the same way. Set `outreach.verify_after_send` to `true` to reload and check first, as before.
 
-If the message can't be confirmed, the lead is recorded `uncertain` and **held**. A crash between pressing Send and recording the outcome leaves a `submitting` row,
+If something goes wrong after Send is pressed and a quick look can't find the message, the lead is recorded `uncertain` and **held**. A crash between pressing Send and recording the outcome leaves a `submitting` row,
 which counts as held too. Nobody held is messaged again until their chat is checked, and the next run
 does that itself (`outreach.auto_resolve`, on by default): before sending anything it reloads each held
 chat; if the message is there it's recorded `sent`, if the chat loaded and it isn't, it's `cleared` and
@@ -129,6 +130,23 @@ a row, 3 refusals from different people in a row, or 2 unconfirmed sends in a ro
 failed is retried on later runs, up to `outreach.max_attempts_per_recipient` (3). It waits
 `outreach.min_delay_seconds` to `max_delay_seconds` (60–180 s) between sends, and only one `send.py`
 runs at a time. Don't scrape while it runs: they share the Chrome profile.
+
+## Tests
+
+```bash
+cd facebook
+../venv/bin/python -m unittest discover tests          # ~45 s, nothing touches facebook.com
+FB_LIVE=1 ../venv/bin/python -m unittest tests/test_live.py -v    # read-only checks on the real site
+```
+
+- `tests/test_stops.py`: what a run does on a logout, PIN prompt, checkpoint or block (stops before
+  typing, records it, exit 2), and what the next run does after (picks up the same lead, never presses
+  Send twice for a message already in the chat, settles held sends).
+- `tests/test_mock_site.py`: `messenger.py`'s real page code in headless Chrome against mock Messenger chats.
+- `tests/test_live.py`: off unless `FB_LIVE=1`. Checks the real profile is logged in as the sender and the
+  inbox has no PIN prompt or block. Add `FB_LIVE_CHAT=<author_key> FB_LIVE_NAME="Their Name"` to also open
+  one chat. It never types anything. Run it before the first real `send.py`, and after Facebook changes
+  something. Failures save their screenshots and page dumps to `debug/live/`.
 
 ## Guardrails
 

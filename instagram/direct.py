@@ -11,11 +11,12 @@ or call it with any logged-in driver:
 
 send_message opens the chat (ig.me/m/<username>, which lands on instagram.com/direct/t/<thread>/), checks that
 it is a chat with that person, that Instagram isn't refusing this account or them, and that the message isn't
-already in the chat; types the message, presses Send once, waits for the message box to clear, then reloads
-the chat and confirms the message is in it. It doesn't follow anyone: follow() does that, and send.py
-calls it before each DM (outreach.auto_follow).
+already in the chat; types the message, presses Send once, waits for the message box to clear and records it
+as sent: like ApplyTwin logging "Applied" after Submit, it doesn't go back and look for it. verify=True
+(outreach.verify_after_send) also reloads the chat and confirms the message is in it. It doesn't follow
+anyone: follow() does that, and send.py calls it before each DM (outreach.auto_follow).
 
-Returns a send_dm.Result, truthy only once the message is confirmed in the chat, with the same statuses:
+Returns a send_dm.Result, truthy once Instagram has taken the message, with the same statuses:
     'sent', 'recipient' (Instagram says there is no such account), 'refused' (Instagram won't let this account
     message them and doesn't say why), 'login' / 'rate_limited' / 'restricted' (account-wide: stop),
     'invalid', 'not_submitted' (failed before Send: safe to retry), 'uncertain' (Send was pressed but the
@@ -45,7 +46,7 @@ SETTLE = 3            # seconds to watch a freshly opened chat for refusals and 
 # Matched only in the page's main area and in dialogs/alerts over it, never in the message box (our own draft).
 # Instagram refusing this account, by send_dm.AccountBlocked kind:
 LOGIN_NEEDED = r"log ?in to instagram|log in to continue|you.ve been logged out|session (has )?expired"
-RATE_LIMITED = (r"try again later.{0,40}(restrict|protect)|we restrict certain activity|action blocked|"
+RATE_LIMITED = (r"try again later.{0,40}(restrict|protect)|we restrict certain activity|we limit how often|action blocked|"
                 r"please wait a few minutes|you.re sending messages too (fast|quickly)")
 RESTRICTED = (r"your account (has been|is|was) (temporarily )?(locked|disabled|suspended|restricted)|"
               r"we suspended your account|confirm (it.s you|your identity)|suspicious (login )?activity")
@@ -328,12 +329,15 @@ def open_for_hand(driver, open_url, text, username, name=""):
     return None, chat_url
 
 
-def confirm_by_hand(driver, chat_url, text, username):
-    """After you say you pressed Send: 'sent' if the message is in the chat after reloading it, Instagram's own
-    answer if the chat shows one, else 'uncertain'."""
+def confirm_by_hand(driver, chat_url, text, username, verify=False):
+    """After you say you pressed Send: Instagram's own answer if the chat shows one, else 'sent' (you pressed
+    it, so it isn't looked for). verify=True: 'sent' only if the message is in the reloaded chat, else
+    'uncertain'."""
     said = page_says(driver, username)
     if said is not None:
         return said
+    if not verify:
+        return Result("sent", "direct (by hand): you pressed Send (not checked in the chat)")
     print("    reloading the chat to look for it...")
     try:
         verify_in_chat(driver, chat_url, text, timeout=30)
@@ -346,8 +350,9 @@ def confirm_by_hand(driver, chat_url, text, username):
 
 
 # ----------------------------------------------------------------- the whole send
-def send_message(driver, open_url, text, username, name="", *, before_submit=None):
-    """Open the chat, check it, type the message, press Send once and confirm it in the reloaded chat.
+def send_message(driver, open_url, text, username, name="", *, before_submit=None, verify=False):
+    """Open the chat, check it, type the message, press Send once and wait for Instagram to take it.
+    verify=True: also reload the chat and confirm the message is in it (outreach.verify_after_send).
     before_submit(): called right before Send is pressed (send.py uses it to note a send is in flight)."""
     if not OPEN_URL.match(open_url or "") or not text.strip() or not (username or "").strip():
         print("[!] not sending: needs an ig.me/m/<username> link, a message and the username")
@@ -373,8 +378,9 @@ def send_message(driver, open_url, text, username, name="", *, before_submit=Non
             failed_before = submit(driver, box, username, about_to_click)
         with step(driver, "step4_confirm", "waiting for Instagram to take the message"):
             confirm(driver, failed_before, username)
-        with step(driver, "step5_verify", "reloading the chat to look for the message"):
-            verify_in_chat(driver, chat_url, text)
+        if verify:
+            with step(driver, "step5_verify", "reloading the chat to look for the message"):
+                verify_in_chat(driver, chat_url, text)
     except StepFailed as exc:
         if exc.kind != "error":                   # Instagram said what went wrong: not delivered
             return Result(exc.kind, f"direct: {exc}")
@@ -386,8 +392,11 @@ def send_message(driver, open_url, text, username, name="", *, before_submit=Non
             return Result("sent", f"direct: confirmed in the chat after: {exc}")
         except Exception as check_error:
             return Result("uncertain", f"direct: Send was pressed; {exc}; chat check: {check_error}")
-    print(f"[done] message to @{username} is in the chat")
-    return Result("sent", "direct: confirmed in the chat")
+    if verify:
+        print(f"[done] message to @{username} is in the chat")
+        return Result("sent", "direct: confirmed in the chat")
+    print(f"[done] message to @{username} sent")
+    return Result("sent", "direct: Send pressed and Instagram took it (not checked in the chat)")
 
 
 # ----------------------------------------------------------------- run directly

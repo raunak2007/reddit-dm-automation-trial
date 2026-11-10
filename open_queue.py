@@ -3,8 +3,9 @@
 By default this does NOT submit anything. It reads a queue HTML file (one <li class=c> per entry, with
 an a.b reddit.com/message/compose/ link, a <pre> body and an input[data-u] Sent checkbox), opens the
 next eligible entry's compose link exactly as written, and waits for you to click Send yourself. When
-you say it's sent, it looks for the message in the account's sent folder: found -> recorded 'sent',
-not found -> recorded 'uncertain' and held. Results go to contacted.csv (ledger.py, shared with
+you say it's sent, it is recorded 'sent' unless the compose page shows Reddit refusing it; it isn't
+looked for in the sent folder (config.json "verify_after_send": true looks: found -> 'sent', not found ->
+'uncertain' and held). Results go to contacted.csv (ledger.py, shared with
 run_loop.py), and which entries are left is worked out from it on every run: anything sent, held or
 given up on is passed over, and anything that failed is offered again. Only the entries you skip with
 [k] are kept separately, in queue_state/<queue>.json.
@@ -15,7 +16,7 @@ MAX_UNCERTAIN_IN_A_ROW sends in a row that can't be confirmed, and records a rec
 ('refused') or doesn't know ('recipient') before you are asked to send.
 
 With --send it submits each entry itself, via the same loop as run_loop.py (check prefilled fields,
-click Send once, confirm in the sent folder; stop on account-wide problems; hold uncertain sends).
+click Send once, record it once Reddit accepts it; stop on account-wide problems; hold uncertain sends).
 
 Entries whose link, checkbox, heading or <pre> body disagree are reported and never opened. Before
 either mode opens anything it takes a lock (one run at a time), checks the browser is logged in as
@@ -215,13 +216,16 @@ def open_entry(driver, entry):
     return page_says(driver, entry["to"])
 
 
-def confirm_by_hand(driver, entry, opened_at, sender):
-    """After you say you clicked Send: (Result, why the walk must stop or None). 'sent' if the message is in
-    the sent folder, Reddit's own answer if the compose page shows one, else 'uncertain'."""
+def confirm_by_hand(driver, entry, opened_at, sender, verify=False):
+    """After you say you clicked Send: (Result, why the walk must stop or None). Reddit's own answer if the
+    compose page shows one, else 'sent' (you clicked it, so it isn't looked for). verify=True: 'sent' only if
+    the message is in the sent folder, else 'uncertain'."""
     if "/message/compose" in driver.current_url:         # anywhere else, page text isn't about this send
         said = page_says(driver, entry["to"])
         if said is not None:
             return said, None
+    if not verify:
+        return Result("sent", "compose (by hand): you clicked Send (not checked in the sent folder)"), None
     want = parse_compose_link(entry["link"])
     print("    checking the sent folder...")
     try:
@@ -291,7 +295,7 @@ def walk_by_hand(driver, queue_path: Path, entries: list, state: dict, cfg: dict
             print("    skipped")
             continue
         else:                                            # anything else: "I clicked Send"
-            result, halt = confirm_by_hand(driver, entry, opened_at, sender)
+            result, halt = confirm_by_hand(driver, entry, opened_at, sender, cfg.get("verify_after_send", False))
 
         ledger.record(username, result)
         if result.status in ACCOUNT_WIDE:
@@ -299,7 +303,7 @@ def walk_by_hand(driver, queue_path: Path, entries: list, state: dict, cfg: dict
             break
         counts[result.status] += 1
         if result.status == "sent":
-            print("    confirmed in the sent folder")
+            print("    recorded as sent")
         else:
             print(f"    [!] {ledger.NOTES.get(result.status, result.status)}: {result.reason}")
         if halt:

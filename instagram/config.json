@@ -30,6 +30,7 @@
   "outreach": {
     "auto_approve": true,
     "auto_resolve": true,
+    "verify_after_send": false,
     "auto_follow": true,
     "sender_user_id": "",
     "daily_dm_limit": 20,

@@ -12,8 +12,10 @@ Reads:
 
 Each run: takes a lock (one run at a time), checks the browser is logged in as sender_username, records
 everyone in that account's Reddit sent folder, then for each eligible entry opens the compose link, checks
-the prefilled fields, clicks Send once, and records 'sent' only once the message is in the sent folder.
-A send that can't be confirmed is recorded 'uncertain' and held until you resolve it (python ledger.py held).
+the prefilled fields, clicks Send once, and records 'sent' as soon as Reddit accepts it, without looking for
+it in the sent folder (config.json "verify_after_send": true looks first, as before). If something goes wrong
+after Send is clicked and the sent folder doesn't show it, it is recorded 'uncertain' and held until you
+resolve it (python ledger.py held).
 The run stops (exit code 2) on any account-wide problem (login, rate limit, restriction) and on streaks of
 failures, refusals or uncertain sends.
 

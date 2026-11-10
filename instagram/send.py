@@ -11,8 +11,10 @@ a follow that fails is noted and the DM goes ahead.
 
 Each run: takes a lock (one run at a time), checks the browser is logged in as config.json's
 outreach.sender_user_id, then for each approved commenter opens their chat, checks it is with them and doesn't
-already hold this message, types it, sends it once, and records 'sent' only once the message is in the chat
-after reloading it. A send that can't be confirmed is recorded 'uncertain' and held; at the start of the next
+already hold this message, types it, sends it once, and records 'sent' as soon as the site takes it (the
+message box clears with no error), without reloading the chat to look for it, the way ApplyTwin logs
+"Applied" right after Submit (outreach.verify_after_send: true reloads and checks, as before). If something
+goes wrong after Send is pressed and a quick look can't find the message, it is recorded 'uncertain' and held; at the start of the next
 run (outreach.auto_resolve, on by default) each held person's chat is reloaded: if the message is in it, it is
 recorded 'sent'; if the chat loaded and the message isn't there, 'cleared', and that run sends it again; if the
 check can't tell, it stays held.
@@ -165,11 +167,13 @@ def record(lead, result):
     store.record(lead["username"], lead["key"], result.status, result.reason)
 
 
-def send_loop(driver, leads, cfg, send=direct.send_message):
+def send_loop(driver, leads, cfg, send=None):
     """Send each eligible lead within the daily cap and delays. Returns a count per status for this run, plus
     'stopped' (why it ended early, '' if it got through the list) and 'halted' (True if it stopped for anything
     other than the daily cap)."""
     out = cfg["outreach"]
+    verify = out.get("verify_after_send", False)
+    send = send or (lambda *a, **k: direct.send_message(*a, verify=verify, **k))
     cap, max_attempts = out["daily_dm_limit"], out.get("max_attempts_per_recipient", store.MAX_ATTEMPTS)
     counts, streak = new_counts(), {"status": None, "n": 0}
     for i, lead in enumerate(leads):
@@ -270,7 +274,7 @@ def walk_by_hand(driver, leads, cfg):
             print("    skipped for this run; it stays approved")
             continue
         else:                                            # anything else: "I pressed Send"
-            result = direct.confirm_by_hand(driver, chat_url, text, user)
+            result = direct.confirm_by_hand(driver, chat_url, text, user, verify=out.get("verify_after_send", False))
 
         record(lead, result)
         if result.status in ACCOUNT_WIDE:
@@ -278,7 +282,7 @@ def walk_by_hand(driver, leads, cfg):
             break
         counts[result.status] += 1
         if result.status == "sent":
-            print("    confirmed in the chat")
+            print("    recorded as sent")
         else:
             print(f"    [!] {NOTES.get(result.status, result.status)}: {result.reason}")
         uncertain_in_a_row = uncertain_in_a_row + 1 if result.status == "uncertain" else 0
@@ -290,7 +294,7 @@ def walk_by_hand(driver, leads, cfg):
 
 def report(counts):
     """Print a run summary; returns the exit code (2 if the run halted on an account or streak problem)."""
-    print(f"\n[done] confirmed sent {counts['sent']}, uncertain {counts['uncertain']}, refused {counts['refused']}, "
+    print(f"\n[done] sent {counts['sent']}, uncertain {counts['uncertain']}, refused {counts['refused']}, "
           f"no such account {counts['recipient']}, failed before sending {counts['not_submitted']}, "
           f"bad entries {counts['invalid']}, skipped {counts['skipped']}; {store.sent_today()} sent today in total")
     if counts["stopped"]:

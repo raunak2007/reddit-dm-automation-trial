@@ -26,7 +26,7 @@ never DMed by default.
 | queue `.html` you curate | every new lead (`outreach.auto_approve`), or the ones you **Approve for sending** |
 | `run_loop.py` (presses Send) / `open_queue.py` (you click Send) | `send.py` / `send.py --by-hand` |
 | `sender_username`, checked via `/api/me` | `outreach.sender_user_id`, checked via the `ds_user_id` cookie |
-| confirmed in the sent folder | confirmed in the chat after reloading it |
+| recorded once Reddit accepts it | recorded once the message box clears (no reload) |
 | `contacted.csv`: `submitting`, `uncertain` = held | `data/contacted.csv`: the same statuses |
 | `python ledger.py held` / `resolve` | `python send.py held` / `resolve` |
 
@@ -112,9 +112,11 @@ For each approved commenter, best score first, `send.py`:
    it's recorded as sent and not sent again).
 3. Types the approved text. Line breaks use Shift+Enter, so nothing goes out early.
 4. Writes a `submitting` row to `data/contacted.csv`, then presses Send **once**.
-5. Waits for the message box to clear, reloads the chat, and records `sent` only once the DM is in it.
+5. Waits for the message box to clear with no error, and records `sent` right away. It doesn't reload
+   the chat to look for the DM (the way ApplyTwin logs "Applied" right after Submit). `--by-hand` trusts
+   your `[s]ent` the same way. Set `outreach.verify_after_send` to `true` to reload and check first, as before.
 
-If the DM can't be confirmed, the person is recorded `uncertain` and **held**. A crash between pressing Send and recording the outcome leaves a `submitting` row,
+If something goes wrong after Send is pressed and a quick look can't find the DM, the person is recorded `uncertain` and **held**. A crash between pressing Send and recording the outcome leaves a `submitting` row,
 which counts as held too. Nobody held is messaged again until their chat is checked, and the next run
 does that itself (`outreach.auto_resolve`, on by default): before sending anything it reloads each held
 chat; if the message is there it's recorded `sent`, if the chat loaded and it isn't, it's `cleared` and
@@ -127,6 +129,25 @@ a row, 3 refusals from different people in a row, or 2 unconfirmed sends in a ro
 failed is retried on later runs, up to `outreach.max_attempts_per_recipient` (3). It waits
 `outreach.min_delay_seconds` to `max_delay_seconds` (60–180 s) between sends, and only one `send.py`
 runs at a time. Don't read comments while it runs: they share the Chrome profile.
+
+## Tests
+
+```bash
+cd instagram
+../venv/bin/python -m unittest discover tests          # ~35 s, nothing touches instagram.com
+IG_LIVE=1 IG_LIVE_PROFILE=<username> ../venv/bin/python -m unittest tests/test_live.py -v
+```
+
+- `tests/test_stops.py`: what a run does on a logout, challenge or action block, including one during
+  the follow (no DM goes out, exit 2), and what the next run does after (follows and messages the same
+  person, never presses Send twice for a message already in the chat, settles held sends).
+- `tests/test_mock_site.py`: `direct.py`'s real page code in headless Chrome against mock profiles and chats.
+  This covers the Follow button lookup: header Follow, not "Suggested for you"; Following / Requested left
+  alone; both block popups; the notifications dialog.
+- `tests/test_live.py`: off unless `IG_LIVE=1`. Checks login, the sender id and the inbox. With
+  `IG_LIVE_PROFILE` it finds the Follow button on that profile without pressing it. `IG_LIVE_FOLLOW=1` makes
+  it really press Follow, so use a test account. `IG_LIVE_CHAT=<username>` also opens one chat. It never types
+  a message. Failures save their screenshots and page dumps to `debug/live/`.
 
 ## Limits it enforces
 
@@ -148,6 +169,6 @@ runs at a time. Don't read comments while it runs: they share the Chrome profile
 | `qualify.py` | Scores each comment with Claude and writes the DM. |
 | `queue_server.py`, `queue.html` | The review page. |
 | `send.py` | Approves new leads (`outreach.auto_approve`) and sends the DMs (or `--by-hand`), records and checks every attempt. |
-| `direct.py` | Sends one DM and confirms it in the chat. |
+| `direct.py` | Sends one DM (and with `verify_after_send`, confirms it in the chat). |
 | `store.py` | `data/leads.json` and the ledger in `data/contacted.csv`. |
 | `data/` | `leads.json` (commenters and drafts) and `contacted.csv` (who you've DMed). Not committed. |

@@ -387,10 +387,12 @@ NOTES = {
 }
 
 
-def send_loop(driver, targets, cfg, sender, send=send_compose):
+def send_loop(driver, targets, cfg, sender, send=None):
     """targets: [(username, compose_link)], links used exactly as given. sender: the verified account name.
     Returns a count per status for this run, plus 'stopped' (why it ended early, '' if it got through the
     list) and 'halted' (True if it stopped for anything other than the daily cap)."""
+    verify = cfg.get("verify_after_send", False)
+    send = send or (lambda *a, **k: send_compose(*a, verify=verify, **k))
     cap = cfg["daily_limit_per_account"]
     max_attempts = cfg.get("max_attempts_per_recipient", MAX_ATTEMPTS)
     counts = {s: 0 for s in ("sent", "recipient", "refused", "invalid", "not_submitted", "uncertain", "skipped")}
@@ -445,7 +447,7 @@ def send_loop(driver, targets, cfg, sender, send=send_compose):
 
 def report(counts):
     """Print a run summary; returns the exit code (2 if the run halted on an account or streak problem)."""
-    print(f"\n[done] confirmed sent {counts['sent']}, uncertain {counts['uncertain']}, refused {counts['refused']}, "
+    print(f"\n[done] sent {counts['sent']}, uncertain {counts['uncertain']}, refused {counts['refused']}, "
           f"no such user {counts['recipient']}, failed before submitting {counts['not_submitted']}, "
           f"bad entries {counts['invalid']}, skipped {counts['skipped']}; {sent_today()} sent today in total")
     if counts["stopped"]:
