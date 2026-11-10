@@ -129,7 +129,9 @@ def from_clips(driver, cfg: dict, user_id: str, cutoff: datetime) -> list[dict]:
         posts += page
         paging = data.get("paging_info") or {}
         max_id = paging.get("max_id")
-        if not paging.get("more_available") or not max_id or not page or older_than(page, cutoff):
+        # instagrapi (and so likely Instagram) pages by paging_info.max_id alone: only an explicit
+        # more_available: false ends it
+        if paging.get("more_available") is False or not max_id or not page or older_than(page, cutoff):
             break
         browser.pause(cfg, 0.4)
     return posts
@@ -156,7 +158,7 @@ def from_api(driver, cfg: dict, username: str, cutoff: datetime) -> list[dict] |
         page = feed_posts(data)
         posts += page
         max_id = data.get("next_max_id")
-        if not data.get("more_available") or not max_id or not page or older_than(page, cutoff):
+        if data.get("more_available") is False or not max_id or not page or older_than(page, cutoff):
             break
         browser.pause(cfg, 0.4)
     posts = merge(posts or profile_posts(user), from_clips(driver, cfg, str(user["id"]), cutoff))

@@ -341,6 +341,18 @@ class Reels(StoreTest):
         self.assertEqual(len(fake.posted), 2)
         self.assertIn("max_id=c1", fake.posted[1][1])
 
+    def test_reels_page_by_max_id_when_more_available_is_missing(self):
+        pages = [[clip("R1", 1)], [clip("R2", 2)]]
+
+        def clips(url):                          # like instagrapi reads it: paging_info.max_id, no more_available
+            n = 1 if "max_id=c1" in url else 0
+            return {"items": pages[n], "paging_info": {"max_id": "c1"} if n == 0 else {}, "status": "ok"}
+        fake = FakeAPI({"users/web_profile_info/": profile_info(), f"feed/user/{ME_ID}/": {"items": []},
+                        "clips/user/": clips})
+        posts = discover.from_api(fake, cfg(), "me.test", NOW - timedelta(days=7))
+        self.assertEqual([p["shortcode"] for p in posts], ["R1", "R2"])
+        self.assertEqual(len(fake.posted), 2, "stops when no max_id comes back")
+
     def test_post_not_answering_asks_with_a_get(self):
         fake = self.fake([item("POST1", 1)], [[clip("R1", 1)]])
         clips = fake.answers["clips/user/"]

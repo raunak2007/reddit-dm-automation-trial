@@ -62,6 +62,11 @@ class Matching(unittest.TestCase):
         self.assertEqual(first["sent_at"], self.sent["jane.doe"])
         self.assertEqual(first["how"], "api")
 
+    def test_a_message_marked_sent_by_us_never_counts(self):
+        mine = dict(msg("v1", 7, 10, "looks like theirs"), is_sent_by_viewer=True)
+        rows, _ = replies.match([thread("666", "jane.doe", 7, mine, msg("v2", 7, 20, "really theirs"))], self.sent)
+        self.assertEqual([r["item_id"] for r in rows], ["v2"])
+
     def test_a_chat_with_no_reply_is_seen_but_has_no_rows(self):
         rows, seen = replies.match([thread("222", "sam.p", 8, msg("s1", ME, 0))], self.sent)
         self.assertEqual((rows, seen), ([], {"sam.p"}))
@@ -150,7 +155,7 @@ class Run(StoreTest):
     def inbox(self, *pages):
         """Pages of the inbox, chained by cursor."""
         def answer(url):
-            n = int(url.split("cursor=c")[1]) if "cursor=c" in url else 0
+            n = int(url.split("cursor=c")[1].split("&")[0]) if "cursor=c" in url else 0
             return {"inbox": {"threads": pages[n], "has_older": n + 1 < len(pages), "oldest_cursor": f"c{n + 1}"},
                     "viewer": {"pk": ME}}
         self.fake.answers["direct_v2/inbox/"] = answer
@@ -169,6 +174,19 @@ class Run(StoreTest):
         again = replies.run(config())
         self.assertEqual((again["new"], again["replied"]), (0, 1))
         self.assertEqual(len(store.load_replies()), 1, "deduped by item id")
+
+    def test_pages_older_chats_without_has_older_and_asks_for_older(self):
+        pages = ([thread("2", "x", 3)], [thread("1", "jane.doe", 7, msg("j2", 7, 30, "hi"))])
+
+        def answer(url):                        # like instagrapi sees it: a cursor, no has_older
+            n = int(url.split("cursor=c")[1].split("&")[0]) if "cursor=c" in url else 0
+            return {"inbox": {"threads": pages[n], **({"oldest_cursor": f"c{n + 1}"} if n + 1 < len(pages) else {})}}
+        self.fake.answers["direct_v2/inbox/"] = answer
+        got = replies.run(config())
+        self.assertEqual(got["new"], 1, "found on the second page")
+        second = [u for u in self.fake.fetched if "direct_v2/inbox" in u][1]
+        self.assertIn("cursor=c1", second)
+        self.assertIn("direction=older", second)
 
     def test_paging_stops_once_everyone_dmed_is_found(self):
         self.inbox([thread("1", "jane.doe", 7), thread("2", "sam.p", 8)], [thread("3", "x", 3)])
@@ -193,7 +211,7 @@ class Run(StoreTest):
 
     def pending(self, *pages):
         def answer(url):
-            n = int(url.split("cursor=c")[1]) if "cursor=c" in url else 0
+            n = int(url.split("cursor=c")[1].split("&")[0]) if "cursor=c" in url else 0
             return {"inbox": {"threads": pages[n], "has_older": n + 1 < len(pages), "oldest_cursor": f"c{n + 1}"}}
         self.fake.answers["direct_v2/pending_inbox/"] = answer
 

@@ -47,7 +47,7 @@ TEXT_MAX = 4000              # the whole message, capped, for data/replies.csv's
 LABELS = {"like": "like", "media": "photo or video", "raven_media": "disappearing photo or video",
           "voice_media": "voice message", "clip": "reel", "media_share": "shared post", "story_share": "shared story",
           "reel_share": "story reply", "animated_media": "GIF", "link": "link", "action_log": "reaction",
-          "xma_media_share": "shared post", "xma_clip": "reel"}
+          "xma_media_share": "shared post", "xma_clip": "reel", "generic_xma": "shared item"}
 
 # Fallback: each chat row in the inbox list, as lines of text, and its link if it has one.
 _ROWS = r"""
@@ -117,6 +117,8 @@ def match(threads: list[dict], sent: dict[str, str], now: datetime | None = None
         since, pk = datetime.fromisoformat(sent[user]), str(them.get("pk") or them.get("pk_id") or them.get("id") or "")
         for item in t.get("items") or []:
             at = when(item.get("timestamp"))
+            if item.get("is_sent_by_viewer") is True:          # ours, whatever user_id says
+                continue
             if not pk or str(item.get("user_id")) != pk or not at or at <= since or not item.get("item_id"):
                 continue
             rows.append({"username": user, "item_id": str(item["item_id"]), "replied_at": at.isoformat(timespec="seconds"),
@@ -135,7 +137,7 @@ def via_api(driver, cfg: dict, sent: dict[str, str], box: str = "inbox") -> list
     threads, cursor = [], None
     for _ in range(r["max_pages"]):
         q = f"persistentBadging=true&limit=20&thread_message_limit={r['messages_per_chat']}" + \
-            (f"&cursor={quote(cursor)}" if cursor else "")
+            (f"&cursor={quote(cursor)}&direction=older" if cursor else "")    # as instagrapi pages older chats
         data = comments.api(driver, f"direct_v2/{box}/?{q}")
         inbox = (data or {}).get("inbox")
         if inbox is None:
@@ -144,7 +146,7 @@ def via_api(driver, cfg: dict, sent: dict[str, str], box: str = "inbox") -> list
         threads += batch
         wanted -= {(u.get("username") or "").lower() for t in batch for u in t.get("users") or []}
         cursor, last = inbox.get("oldest_cursor"), when((batch[-1] if batch else {}).get("last_activity_at"))
-        if not wanted or not inbox.get("has_older") or not cursor or (last and last < earliest):
+        if not wanted or inbox.get("has_older") is False or not cursor or (last and last < earliest):
             break
         browser.pause(cfg, 0.4)
     return threads
