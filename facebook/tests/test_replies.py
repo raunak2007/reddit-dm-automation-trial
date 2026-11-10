@@ -6,7 +6,9 @@ reads real rows from a mock chat in Chrome).
 """
 from __future__ import annotations
 
+import csv
 import unittest
+from datetime import datetime, timedelta
 
 from helpers import FakeChrome, StoreTest, config, lead
 
@@ -124,6 +126,123 @@ class Watching(StoreTest):
         self.patch(replies.send, "prepare")
         self.assertEqual(replies.run(config(replies_per_run=2)), 0)
         self.assertEqual(len(opened), 2)
+
+
+class FullText(StoreTest):
+    def test_the_whole_reply_is_kept_next_to_the_snippet(self):
+        long = "Yes please. " + "We are looking at schools in Ohio and need help with essays. " * 100
+        store.record_reply("1001", "Person 1", "p:1", long[:replies.SNIPPET], "u", text=long)
+        row = store.replies()["1001"]
+        self.assertEqual(row["snippet"], long[:replies.SNIPPET])
+        self.assertEqual(row["text"], long[:store.REPLY_TEXT_MAX])
+        self.assertEqual(len(row["text"]), store.REPLY_TEXT_MAX)
+
+    def test_check_loop_records_every_message_after_our_dm(self):
+        l = lead(1)
+        store.save_leads({l["post_key"]: l})
+        store.record(l["author_key"], l["author"], l["post_key"], "sent", "fake: sent")
+        rows = [them("before"), me(l["approved"]["dm"]), them("Thanks!"), them("Is Tuesday ok?")]
+        driver = FakeChrome({store.messenger_url(l["author_key"]): {"text": f"{l['author']} {l['approved']['dm']}",
+                                                                   "composer": True, "rows": rows}})
+        self.patch(messenger, "SETTLE", 0)
+        replies.check_loop(driver, replies.to_check(config()), config())
+        self.assertEqual(store.replies()[l["author_key"]]["text"], "Thanks! / Is Tuesday ok?")
+
+    def test_an_old_file_without_the_text_column_still_reads_and_is_upgraded(self):
+        store.DATA.mkdir(parents=True, exist_ok=True)
+        store.REPLIES.write_text("author_key,author,post_key,seen_at,snippet,chat_url\n"
+                                 "1001,Person 1,p:1,2026-10-01T10:00:00,\"hi, yes\",https://www.facebook.com/messages/t/1001\n")
+        old = store.replies()["1001"]
+        self.assertEqual((old["snippet"], old["text"], old["chat_url"]),
+                         ("hi, yes", "hi, yes", "https://www.facebook.com/messages/t/1001"))
+        self.assertFalse(store.record_reply("1001", "Person 1", "p:1", "again", "x"), "still deduped")
+        self.assertTrue(store.record_reply("1002", "Person 2", "p:2", "short", "u2", text="short and long"))
+        self.assertTrue(store.REPLIES.read_text().startswith(",".join(store.REPLY_FIELDS)))
+        rows = store.replies()
+        self.assertEqual((rows["1001"]["text"], rows["1001"]["chat_url"]),
+                         ("hi, yes", "https://www.facebook.com/messages/t/1001"))
+        self.assertEqual((rows["1002"]["snippet"], rows["1002"]["text"], rows["1002"]["chat_url"]),
+                         ("short", "short and long", "u2"))
+
+
+ANSWER = "Hi Person 1, the first call is free. Tuesday or Wednesday?"
+
+
+class AfterOurAnswer(StoreTest):
+    """Someone we answered from the inbox is checked again, and each new message of theirs gets its own row."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(messenger, "SETTLE", 0)
+        self.l = lead(1)
+        self.l["approved"]["dm"] = DM
+        store.save_leads({self.l["post_key"]: self.l})
+        store.record(self.l["author_key"], self.l["author"], self.l["post_key"], "sent", "fake: sent")
+        then = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
+        store.DATA.mkdir(parents=True, exist_ok=True)
+        with open(store.REPLIES, "w", newline="") as f:     # their first reply, recorded two hours ago
+            w = csv.DictWriter(f, store.REPLY_FIELDS)
+            w.writeheader()
+            w.writerow({"author_key": self.l["author_key"], "author": self.l["author"], "post_key": self.l["post_key"],
+                        "seen_at": then, "snippet": "How much is it?", "text": "How much is it?",
+                        "chat_url": store.messenger_url(self.l["author_key"])})
+        a = self.inbox.add_draft("facebook", f"{self.l['author_key']}:{then}", person=self.l["author_key"],
+                                 name=self.l["author"], chat_url=store.messenger_url(self.l["author_key"]),
+                                 their_message="How much is it?", our_message=DM, draft=ANSWER)
+        self.inbox.update(a["id"], status="sent",
+                          sent_at=(datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds"))
+
+    def check(self, rows, only_them=False):
+        driver = FakeChrome({store.messenger_url(self.l["author_key"]): {
+            "text": f"{self.l['author']} {DM}", "composer": True, "rows": rows}})
+        people = [p for p in replies.plan(config()) if not only_them or p[0] == self.l["author_key"]]
+        counts = replies.check_loop(driver, people, config())
+        self.assertEqual(driver.box.typed, [])
+        return counts
+
+    def texts(self):
+        return [r["text"] for r in store.reply_rows(self.l["author_key"])]
+
+    def test_a_second_reply_after_our_answer_is_recorded_once(self):
+        chat = [me(DM), them("How much is it?"), me(ANSWER), them("Tuesday works!")]
+        self.assertEqual(self.check(chat)["new_messages"], 1)
+        self.assertEqual(self.texts(), ["How much is it?", "Tuesday works!"])
+        self.check(chat)
+        self.assertEqual(self.texts(), ["How much is it?", "Tuesday works!"], "not recorded twice")
+        self.check(chat + [them("Is 4pm ok?"), them("ok")])
+        self.assertEqual(self.texts(), ["How much is it?", "Tuesday works!", "Is 4pm ok?", "ok"])
+        seen = [r["seen_at"] for r in store.reply_rows(self.l["author_key"])]
+        self.assertEqual(len(set(seen)), len(seen), "seen_at is unique per person: the inbox keys on it")
+        self.assertEqual(store.replies()[self.l["author_key"]]["text"], "ok", "replies() gives the latest row")
+
+    def test_nothing_new_means_no_row(self):
+        counts = self.check([me(DM), them("How much is it?"), me(ANSWER)])
+        self.assertEqual((counts["new_messages"], counts["no_reply"]), (0, 1))
+        self.assertEqual(self.texts(), ["How much is it?"])
+
+    def test_our_own_answer_and_later_messages_are_not_counted(self):
+        self.check([me(DM), them("How much is it?"), me(ANSWER), me("Also, here is the essay guide")])
+        self.assertEqual(self.texts(), ["How much is it?"])
+
+    def test_their_messages_before_our_answer_are_not_new(self):
+        self.check([me(DM), them("How much is it?"), them("hello?"), me(ANSWER)])
+        self.assertEqual(self.texts(), ["How much is it?"])
+
+    def test_a_chat_without_our_messages_is_left_for_the_next_run(self):
+        counts = self.check([them("How much is it?"), them("Tuesday works!")])
+        self.assertEqual(counts["unreadable"], 1)
+        self.assertEqual(self.texts(), ["How much is it?"])
+
+    def test_waiting_on_them_comes_first_within_the_cap(self):
+        other = lead(2)
+        store.save_leads({**store.load_leads(), other["post_key"]: other})
+        store.record(other["author_key"], other["author"], other["post_key"], "sent", "fake: sent")
+        plan = replies.plan(config())
+        self.assertEqual([p[0] for p in plan], [self.l["author_key"], other["author_key"]])
+        self.assertEqual(len(plan[0]), 6, "a re-check carries since and our texts")
+        self.check([me(DM), them("How much is it?"), me(ANSWER), them("Tuesday works!")], only_them=True)
+        self.assertEqual([p[0] for p in replies.plan(config())], [other["author_key"], self.l["author_key"]],
+                         "they've answered our answer: never-checked chats come first now")
 
 
 if __name__ == "__main__":

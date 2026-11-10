@@ -55,11 +55,23 @@ TOOL = {
 }
 
 
-def system_prompt(cfg: dict) -> str:
+def business_values(cfg: dict) -> dict:
+    """The {placeholders} the prompts can use, from config.json's business block (followup.py uses them too)."""
     b = cfg["business"]
-    values = {"business_name": b["name"], "website": b["website"], "booking_link": b["booking_link"],
-              "sender_first_name": b["sender_first_name"], "offer": b["offer"],
-              "services": "\n".join(f"- {s}" for s in b["services"])}
+    return {"business_name": b["name"], "website": b["website"], "booking_link": b["booking_link"],
+            "sender_first_name": b["sender_first_name"], "offer": b["offer"],
+            "services": "\n".join(f"- {s}" for s in b["services"])}
+
+
+def client():
+    """The Anthropic client, with ANTHROPIC_API_KEY from the environment or facebook/.env."""
+    load_dotenv(HERE / ".env")
+    import anthropic
+    return anthropic.Anthropic()
+
+
+def system_prompt(cfg: dict) -> str:
+    values = business_values(cfg)
     parts = [(PROMPTS / name).read_text().format(**values) for name in ("qualify.md", "message.md")]
     return ("\n\n".join(parts) + f"\n\nToday is {datetime.now():%B %d, %Y}. Only posts from the last "
             f"{cfg['search']['lookback_days']} days count. Always answer by calling record_lead.")

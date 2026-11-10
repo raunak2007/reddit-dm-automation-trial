@@ -9,14 +9,14 @@ from __future__ import annotations
 import json
 import unittest
 
-from helpers import SENDER, FakeDriver, LedgerTest, ago, config, post, root_config
+from helpers import SENDER, FakeDriver, LedgerTest, Sender, ago, config, post, root_config
 
 import ledger
 import scrape
 import send
 import store
 from open_queue import parse_queue
-from send_dm import ME_URL, Result, parse_compose_link
+from send_dm import ME_URL, Result
 
 
 def scored(pid, author, score=80, minor=False, created=None, message=None, **ai):
@@ -26,22 +26,6 @@ def scored(pid, author, score=80, minor=False, created=None, message=None, **ai)
                   "need": "essay help", "subject": f"Subject for {author}",
                   "message": message if message is not None else f"Hi u/{author}, a tip about your essay.", **ai}
     return lead
-
-
-class Sender:
-    """A send function for ledger.send_loop: answers from a script ({username: Result}, default 'sent'), presses
-    (before_submit) for every send that gets as far as Send, and remembers who it was called for."""
-
-    def __init__(self, answers=None):
-        self.answers, self.calls = answers or {}, []
-
-    def __call__(self, driver, link, *, sender=None, before_submit=None):
-        to = parse_compose_link(link)["to"]
-        self.calls.append(to)
-        answer = self.answers.get(to, Result("sent", "fake: sent"))
-        if answer.status in ("sent", "uncertain"):
-            before_submit()
-        return answer
 
 
 class Eligibility(LedgerTest):

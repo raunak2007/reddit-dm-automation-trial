@@ -76,7 +76,7 @@ def status_of(lead: dict, cfg: dict, handled: dict, hist: dict) -> str:
 
 def state() -> dict:
     cfg = _cfg()
-    handled, hist = store.handled_posts(), store.history()
+    handled, hist, fus = store.handled_posts(), store.history(), store.followups()
     policy, min_score = cfg["outreach"]["minor_policy"], cfg["ai"]["min_score"]
     out = []
     for lead in store.load_leads().values():
@@ -96,6 +96,8 @@ def state() -> dict:
             "why": (store.skip_reason(akey, hist=hist) or "") if sending and akey else "",
             "comment": lead.get("edited", {}).get("comment", a["comment"]),
             "messenger_url": store.messenger_url(akey) if akey else "",
+            "followup": ({"status": fus[akey][-1]["status"], "at": fus[akey][-1]["timestamp"]}
+                         if akey in fus and fus[akey][-1]["post_key"] == lead["post_key"] else None),
         })
     out.sort(key=lambda l: (l["status"] not in ("todo", "approved"), -l["ai"]["score"], l["posted_at"] or ""))
     return {"leads": out, "sent_today": store.sent_today(), "cap": cfg["outreach"]["daily_dm_limit"],

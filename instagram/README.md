@@ -8,11 +8,16 @@ each of them a short, casual DM that starts with their name. Then `send.py` send
 
 ```bash
 python run.py                                          # the daily run: find recent posts, read comments, draft DMs, send
-python run.py replies                                  # who replied to their DM -> data/replies.csv
+python run.py replies                                  # who replied to their DM (inbox + Message Requests) -> data/replies.csv
 python run.py stats                                    # posts, leads, sent, held, replied
 python run.py https://www.instagram.com/p/XXXXXXXX/    # the same run for one post you name
 python run.py send                                     # send any drafted DMs that haven't gone out yet
+python run.py answer                                   # send the answers you approved in the shared inbox (../inbox)
+python run.py followup                                 # one follow-up to people who never replied (off by default)
+python run.py livecheck                                # read-only checks against instagram.com, for a weekly scheduler
 ```
+
+`python run.py --help` (or any command with `--help`) only prints the help; nothing opens Chrome.
 
 **Every new lead at or above `ai.min_score` is sent its drafted DM** (`outreach.auto_approve`, on by
 default), and **each person is followed right before their DM** (`outreach.auto_follow`). Set `auto_approve` to `false` to send only what you approve
@@ -67,7 +72,10 @@ python run.py stats
 1. **Finds the posts** (`discover.py`): your recent posts and reels (`instagram.my_username`), plus
    those of any accounts in `discover.accounts` and any links in `discover.posts`. It asks Instagram's
    own web API inside the logged-in Chrome profile (`users/web_profile_info`, then `feed/user/<id>`,
-   the way `comments.py` reads comments); if that doesn't answer, it reads the profile page's grid.
+   the way `comments.py` reads comments), then the account's reels from `clips/user/` (a form POST of
+   `target_user_id`, as Instagram web's Reels tab asks it, or a GET if that doesn't answer), since a reel
+   shared only to the Reels tab isn't in the feed. A reel in both is kept once; reels count toward the same
+   lookback and `max_posts`. If the API doesn't answer, it reads the profile page's grid and its Reels tab.
 2. **Reads each one's comments** if it was posted within `discover.lookback_days`, newest first, up to
    `discover.max_posts` per account. Every run reads them again, so new commenters are picked up; with
    `discover.skip_unchanged` a post whose comment count hasn't changed since its last read is skipped.
@@ -88,15 +96,69 @@ while reading. Only one run uses the Chrome profile at a time.
 ### Replies
 
 `python run.py replies` reads your Direct inbox through the web API (`direct_v2/inbox/`, page by
-page). It never opens a chat, so nothing is marked seen, liked or sent. For everyone
+page), then Message Requests (`direct_v2/pending_inbox/`) for anyone whose chat wasn't in the inbox.
+It never opens a chat or accepts a request, so nothing is marked seen, liked, accepted or sent. For everyone
 `data/contacted.csv` records as `sent`, it finds their one-to-one chat and records each message
-from them dated after our DM: username, when, a short snippet and the chat link, in
-`data/replies.csv`, once per message (Instagram's item id), then prints the new ones and how many
-people have replied. `contacted.csv` isn't changed. Paging stops once every DMed person's chat has
-been seen, the chats get older than the first DM, or after `replies.max_pages` pages. If the
-endpoint doesn't answer, it reads the chat list on the inbox page instead (still without opening a
-chat): that gives only each chat's latest message, with an approximate time. Chats sitting in
-Message Requests (or a creator account's General tab) may not show up.
+from them dated after our DM: username, when, a short snippet, the whole message (`text`, up to 4000
+characters, line breaks kept) and the chat link, in `data/replies.csv`, once per message (Instagram's
+item id), then prints the new ones and how many people have replied. The `how` column says where it was
+found: `api` (inbox), `request` (Message Requests, not accepted) or `page` (the fallback below).
+`contacted.csv` isn't changed. A `replies.csv` from before the `text` column is still read (its text is
+the snippet) and is rewritten with the new header the next time a reply is added. Paging stops once every
+DMed person's chat has been seen, the chats get older than the first DM, or after `replies.max_pages`
+pages. If the inbox endpoint doesn't answer, it reads the chat list on the inbox page instead (still
+without opening a chat): that gives only each chat's latest message, with an approximate time. A creator
+account's General tab may not show up.
+
+### Answers (`python run.py answer`)
+
+The shared inbox at the repo root (`../inbox`, its record is `inbox/data/answers.json`) drafts an answer
+to each reply, and you approve it on its page. `python run.py answer` sends the approved Instagram ones,
+oldest approval first:
+
+1. Takes `send.py`'s lock, then turns any entry a dead run left `sending` into `uncertain`, so nothing is
+   resent blind. Checks the browser is logged in as `outreach.sender_user_id`.
+2. Asks Message Requests (read only) which of these people's chats sit there. Those answers are marked
+   `failed` with the reason: the request has to be accepted first, and nothing here accepts one. Accept
+   it in Instagram and approve the answer again. (If that endpoint doesn't answer, `replies.csv`'s
+   `how=request` decides.)
+3. For each one still `approved`: opens `ig.me/m/<person>`, checks it is their chat, that the answer isn't
+   already in it, types it, marks the entry `sending`, presses Send once, then marks it `sent`
+   (`uncertain` if Send was pressed and that couldn't be confirmed, `failed` if it never got to Send).
+
+Nobody is followed, `contacted.csv` isn't touched, and answers don't count toward `daily_dm_limit`. At most
+`answers.max_per_run` (10) per run, with the usual `min_delay_seconds`..`max_delay_seconds` between them. It
+stops with exit code 2 on anything account-wide (the entry stays `approved` if Send wasn't pressed), and
+after 3 failed or 2 uncertain answers in a row.
+
+### Follow-ups (`python run.py followup`)
+
+Off until you set `outreach.followup.enabled` to `true`. Then each run sends **one** follow-up, ever, to
+each person DMed at least `outreach.followup.after_days` (6) days ago who hasn't replied
+(`data/replies.csv`), hasn't been sent an answer from the inbox, hasn't had a follow-up, and isn't thought
+to be under 18. `python followup.py --list` shows who is due one and why others aren't (no browser).
+
+- It reads the inbox and Message Requests through the API first (replies found are saved and those people
+  skipped), and **right before each send** reads that person's chat again (`direct_v2/threads/<id>/`,
+  without opening it or marking it seen). A new reply, or a chat that can't be found or re-read, means no
+  follow-up.
+- Claude drafts it (`prompts/followup.md`: casual, short, referencing the first DM), with
+  `outreach.followup.template` used when AI is off or the draft fails.
+- It sends like `send.py` (no follow): `followup_submitting` before the press, then `followup_sent`,
+  `followup_uncertain` (never retried) or `followup_failed` (may be tried again later). These rows have the
+  lead key `followup:<username>`, so the review page and the first DM's held / sent logic are unchanged.
+- Follow-ups count toward `outreach.daily_dm_limit`: `store.sent_today()` counts each person's first DM and
+  their follow-up, so `send.py` and the review page see them too. At most `outreach.followup.max_per_run`
+  per run; exit code 2 on anything account-wide, and after 3 failed or 2 uncertain in a row.
+
+### Live check (`python run.py livecheck`)
+
+For a weekly scheduler: runs `tests/test_live.py` against the real instagram.com with `IG_LIVE=1`, taking
+the profile and chat to check from config.json's `livecheck` section (not from `IG_LIVE_*` variables in
+your shell). `IG_LIVE_FOLLOW` is never passed on, and it runs with `IG_LIVE_READONLY=1`, so nothing is
+typed, followed or pressed (not even "Not Now" on a notifications dialog). It takes `send.py`'s lock.
+Exit code `0` if the checks pass, `2` if the failures show an account problem (logged out, wrong account,
+a challenge, an action block), `1` for anything else (Chrome didn't start, the markup changed, a timeout).
 
 ### Settings
 
@@ -109,6 +171,14 @@ Message Requests (or a creator account's General tab) may not show up.
 | `discover.skip_unchanged` | `true` | Skip a post whose comment count hasn't changed since it was last read. |
 | `replies.max_pages` | 10 | Inbox pages (20 chats each) to read at most. |
 | `replies.messages_per_chat` | 20 | Latest messages of each chat the inbox returns. |
+| `answers.max_per_run` | 10 | Approved answers sent per `run.py answer`. |
+| `outreach.followup.enabled` | `false` | Turn on `run.py followup`. |
+| `outreach.followup.after_days` | 6 | Days after our DM before a follow-up. |
+| `outreach.followup.max_per_run` | 5 | Follow-ups per run (they also count toward `daily_dm_limit`). |
+| `outreach.followup.template` | (a bump line) | The follow-up when Claude can't draft one: `{first_name}`, `{topic}`, `{booking_link}`, ... |
+| `livecheck.profile` | `""` | A profile whose Follow button `livecheck` finds (never pressed). Empty: skipped. |
+| `livecheck.chat` | `""` | A username whose chat `livecheck` opens (nothing typed). Empty: skipped. |
+| `livecheck.timeout_minutes` | 10 | Give up on the live checks after this long (exit 1). |
 
 ## Write your message
 
@@ -205,24 +275,35 @@ IG_LIVE=1 IG_LIVE_PROFILE=<username> ../venv/bin/python -m unittest tests/test_l
 - `tests/test_discover.py`: finding posts from fake API answers: the media feed, the lookback and
   `max_posts`, pinned posts, `data/posts.json` across runs, the profile-grid fallback, and `python run.py`
   exiting 2 (and sending nothing) when Instagram refuses the account.
+- `tests/test_discover.py` also covers the reels endpoint: reels missing from the feed, kept once, paged to
+  the lookback, the GET fallback, `max_posts`, and only read-only endpoints ever POSTed to.
 - `tests/test_replies.py`: fake inbox answers: matching chats to the people sent a DM, only their messages
-  after our send counting, dedupe by item id, paging, the chat-list fallback, and `stats`' replied count.
+  after our send counting, dedupe by item id, paging, the full `text` column (and old files without it),
+  Message Requests (`how=request`, never accepted), the chat-list fallback, and `stats`' replied count.
+- `tests/test_answer.py`: `run.py answer` against a temp inbox record: `sending` before the press, stuck
+  entries, Message Requests, the per-run cap, account-wide stops and streaks. `test_mock_site.py` sends one
+  answer through the real page code.
+- `tests/test_followup.py`: who is due a follow-up, the re-check right before each send, drafting and the
+  template, the daily cap counting follow-ups (in `send.py` too), one ever, and stops.
+- `tests/test_livecheck.py`: the environment `livecheck` gives `test_live.py`, its exit codes, and that every
+  script's `--help` only prints help.
 - `tests/test_mock_site.py`: `direct.py`'s real page code in headless Chrome against mock profiles and chats.
   This covers the Follow button lookup: header Follow, not "Suggested for you"; Following / Requested left
   alone; both block popups; the notifications dialog. Also the two page fallbacks (profile grid, inbox list).
 - `tests/test_live.py`: off unless `IG_LIVE=1`. Checks login, the sender id and the inbox. With
   `IG_LIVE_PROFILE` it finds the Follow button on that profile without pressing it. `IG_LIVE_FOLLOW=1` makes
   it really press Follow, so use a test account. `IG_LIVE_CHAT=<username>` also opens one chat. It never types
-  a message. Failures save their screenshots and page dumps to `debug/live/`.
+  a message. `IG_LIVE_READONLY=1` (what `run.py livecheck` uses) presses nothing at all. Failures save their
+  screenshots and page dumps to `debug/live/`.
 
 ## Limits it enforces
 
 - `outreach.daily_dm_limit` (default 20), counted across all runs from `data/contacted.csv`: `send.py`
-  sends, **Mark sent** clicks, and held sends from today. Both the review page and `send.py`
+  sends, **Mark sent** clicks, held sends from today, and follow-ups sent today. Both the review page and `send.py`
   enforce it. Instagram puts DMs to people who
   don't follow you into Message Requests, and a burst of them is what triggers action blocks. Stay
   around 20–30 a day, fewer on a new account.
-- One DM per person, ever. That includes held sends.
+- One DM per person, ever, plus at most one follow-up (off by default). That includes held sends.
 - Commenters who seem to be under 18 are hidden (`outreach.minor_policy: "skip"`).
 - Comment reading stops at once if Instagram rate-limits or logs out the profile.
 
@@ -233,7 +314,10 @@ IG_LIVE=1 IG_LIVE_PROFILE=<username> ../venv/bin/python -m unittest tests/test_l
 | `run.py` | The commands above. |
 | `discover.py` | Finds the recent posts to read (web API, else the profile grid) and remembers them in `data/posts.json`. |
 | `comments.py` | Reads all comments and replies, using Instagram's own web endpoint inside your logged-in session. Falls back to reading the page. |
-| `replies.py` | Reads the inbox (web API, else the chat list) for replies to our DMs, into `data/replies.csv`. |
+| `replies.py` | Reads the inbox and Message Requests (web API, else the chat list) for replies to our DMs, into `data/replies.csv`. |
+| `answer.py` | `run.py answer`: sends the answers approved in the shared inbox (`../inbox/store.py`). |
+| `followup.py`, `prompts/followup.md` | `run.py followup`: one follow-up to people who never replied. |
+| `livecheck.py` | `run.py livecheck`: the read-only live checks, with an exit code for a scheduler. |
 | `qualify.py` | Scores each comment with Claude and writes the DM. |
 | `queue_server.py`, `queue.html` | The review page. |
 | `send.py` | Approves new leads (`outreach.auto_approve`) and sends the DMs (or `--by-hand`), records and checks every attempt. |

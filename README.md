@@ -60,6 +60,34 @@ check, one send per person, recorded as sent once the site takes it (no checking
 account-wide problems. It shares this folder's `chrome_version.py` and `send_dm.py` helpers. Setup and
 use: [instagram/README.md](instagram/README.md).
 
+## Replies, answers and follow-ups (`inbox/`)
+
+Each platform's `replies` job records who wrote back (full text). `python inbox/run.py` has Claude draft an answer
+to each conversation and opens a page at http://127.0.0.1:8767 where you edit, approve or dismiss them. Nothing
+is sent until you approve it. The next daily run (or `<platform> run.py answer`) sends the approved ones in
+the same chat. "Stop messaging me" and clear no-thanks replies are flagged "suggest: dismiss" instead of
+getting a pitch. See [inbox/README.md](inbox/README.md).
+
+Each platform can also send **one** follow-up to people who haven't replied after `after_days` (6). It's off until
+you set `followup.enabled` to `true` (Reddit: `reddit/config.json`; Facebook and Instagram: `outreach.followup`).
+It skips anyone who replied, was answered or is a likely minor, re-reads their chat right before sending, and
+counts toward the same daily cap as first DMs. Turn it on only after the weekly live check has passed, because it
+relies on reply detection being right.
+
+## Results: bookings and insights
+
+- Each platform's booking link carries `utm_source=<platform>`, and links in drafted answers also carry
+  `utm_content=<person>`. `python bookings/run.py import <export.csv>` (any booking tool's or form's CSV
+  export) or `python bookings/run.py calendly` (with `CALENDLY_TOKEN` in `bookings/.env`; then set that job's
+  `"enabled": true` in `schedule.json`) records each booking and matches it to the person it came from. The
+  match uses the UTM tag first, then a username in the form answers, then an exact full name; anything
+  unclear is left for `bookings/run.py link`.
+- `python outcomes.py` shows contacted / followed up / replied / answered / booked per platform; `--today` is
+  the daily summary.
+- `python insights/run.py` (weekly) writes `insights/reports/<date>.md`: reply and booking rates by platform,
+  score, category and source, with example messages and suggested prompt edits from Claude. It never edits a
+  prompt; copy in what you agree with.
+
 ## Running everything every day
 
 ```bash
@@ -69,9 +97,14 @@ venv/bin/python schedule.py install --at 10:00   # run daily.py every day at 10:
 venv/bin/python schedule.py status | run-now | uninstall
 ```
 
-`daily.py` runs, in order: Reddit (find + send, then replies), Facebook (scrape + score + send, and comments if
-`outreach.auto_comment` is on, then replies) and Instagram (find your recent posts + read comments + send, then
-replies). Each job's output goes to `logs/<date>.log`. If a job stops on an account problem (logged out, blocked, a
+`daily.py` runs `schedule.json`'s jobs in order. For each platform: the weekly read-only live check (Mondays),
+the main run (find + score + send; Facebook comments too if `outreach.auto_comment` is on), replies, answer
+(send approved answers) and followup (does nothing until enabled). Then it drafts answers to new replies, and on
+Mondays writes the insights report. If a live check fails, that platform is **paused**: its jobs are skipped
+and it re-checks every day until the check passes (or `daily.py --resume <platform>`), since a site that
+changed its pages is when a script misbehaves. Every run ends with a summary notification (today's DMs,
+follow-ups, replies, bookings, answers waiting for you; also in `logs/summary-<date>.txt`). It also deletes
+failure screenshots older than 14 days. Each job's output goes to `logs/<date>.log`. If a job stops on an account problem (logged out, blocked, a
 checkpoint or chat PIN: exit code 2), that platform's later jobs are skipped, the others still run, and you get a
 macOS notification. A crash or timeout is notified too. Turn a job off with `"enabled": false` in
 `schedule.json`. The schedule runs only while you're logged in to the Mac, and a run missed during sleep runs on

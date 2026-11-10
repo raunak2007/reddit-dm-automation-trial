@@ -11,6 +11,12 @@ that none of its block/PIN patterns fire on ordinary pages.
     FB_LIVE=1 FB_LIVE_POST=<post url> FB_LIVE_POST_AUTHOR="Jane Doe" FB_LIVE_POST_TEXT="first words of the post" \
         ../venv/bin/python -m unittest tests/test_live.py -v
                                     also open that post and check comment.py finds exactly its own comment box
+    python run.py livecheck         the same, with those settings from config.json's livecheck block, and an exit
+                                    code for a scheduler (0 ok, 2 account problem, 1 anything else)
+
+FB_LIVE_STRICT=1 (livecheck sets it): a profile that isn't logged in fails the run instead of skipping it.
+Everything here is read-only: pages are opened and read, never typed into or clicked (tests/test_livecheck.py checks
+this file for any call that could type, press or record).
 
 Close send.py / run.py first: Chrome won't open the same profile twice. A failed check saves its screenshot and
 page listing (step*_failed.png / _dom.txt) in debug/live/; when the markup changed, copy it into mock_site.py so
@@ -31,6 +37,7 @@ import store
 from send_dm import step
 
 LIVE = os.environ.get("FB_LIVE") == "1"
+STRICT = os.environ.get("FB_LIVE_STRICT") == "1"
 CHAT, NAME = os.environ.get("FB_LIVE_CHAT", ""), os.environ.get("FB_LIVE_NAME", "")
 POST, POST_AUTHOR = os.environ.get("FB_LIVE_POST", ""), os.environ.get("FB_LIVE_POST_AUTHOR", "")
 POST_TEXT = os.environ.get("FB_LIVE_POST_TEXT", "")
@@ -52,6 +59,8 @@ class LiveFacebook(unittest.TestCase):
             browser.ensure_logged_in(driver, cfg, interactive=False)
         except SystemExit as exc:
             driver.quit()
+            if STRICT:                            # livecheck: logged out is an account problem, not a skip
+                raise RuntimeError(f"not logged in: {exc}") from None
             raise unittest.SkipTest(f"not logged in: {exc}")
 
     @classmethod

@@ -1,7 +1,8 @@
 """helpers.py - what the facebook tests share.
 
 StoreTest   each test gets an empty data/ folder of its own (store.py's paths point into a temp dir) and runs in
-            that dir, so failed-step screenshots and DOM listings land there instead of in the repo
+            that dir, so failed-step screenshots and DOM listings land there instead of in the repo; the shared
+            answers record (../inbox/store.py) points into the same temp dir (self.inbox)
 config()    config.json's shape with every delay at 0
 FakeChrome  a stand-in driver that answers messenger.py's page helpers (notice, composer, has, rows) from a dict
             of pages: {url: {"text": what the page says, "composer": True, "redirect": url, "rows": [message rows]}}.
@@ -23,7 +24,9 @@ from unittest import mock
 FOLDER = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(FOLDER))
 
+import browser  # noqa: E402,F401  (puts the repo root, with inbox/, on sys.path)
 import store  # noqa: E402
+from inbox import store as inbox  # noqa: E402
 
 SENDER = "100"
 
@@ -124,6 +127,10 @@ class StoreTest(unittest.TestCase):
                             ("REPLIES", data / "replies.csv"),
                             ("LOCK", data / "send.lock")):
             self.patch(store, name, value)
+        answers = self.tmp / "inbox"
+        for name, value in (("DATA", answers), ("ANSWERS", answers / "answers.json"), ("LOCK", answers / "answers.lock")):
+            self.patch(inbox, name, value)
+        self.inbox = inbox
         cwd = os.getcwd()
         os.chdir(self.tmp)
         self.addCleanup(os.chdir, cwd)

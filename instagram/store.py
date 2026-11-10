@@ -22,14 +22,25 @@ data/contacted.csv   one row per event: username, lead_key, status, timestamp, n
                          login / rate_limited / restricted   account-wide: the run stopped there
                          cleared        a held send checked and found not to have gone out (send.py does this
                                         at the start of each run, or `send.py resolve ... --not-sent`)
+                     from followup.py (one follow-up, ever, to someone who got our DM and never replied; these
+                     rows' lead_key is "followup:<username>", so the review page's view of the lead is unchanged,
+                     and the first DM's held / sent logic below ignores them):
+                         followup_submitting   written just before Send is pressed on the follow-up
+                         followup_sent         Instagram took the follow-up
+                         followup_uncertain    Send was pressed but it couldn't be confirmed (never retried)
+                         followup_failed       not sent (failed before Send, or skipped by a check): may retry
 
 data/posts.json      {"<shortcode>": {"url", "owner", "taken_at", "comment_count", "first_seen", "last_read",
                      "reads", "commenters", "source"}}: the posts discover.py found and when each was last read.
 data/replies.csv     one row per message someone sent back after our DM (replies.py): username, item_id,
-                     replied_at, snippet, thread_url, sent_at, found_at, how. One row per item_id.
+                     replied_at, snippet, text (the whole message, up to 4000 characters), thread_url, sent_at,
+                     found_at, how ('api' = the inbox, 'request' = Message Requests, 'page' = the inbox page's
+                     chat list). One row per item_id. Files from before `text` existed are still read (their
+                     text is the snippet) and get the column the next time a reply is added.
 
 From that history, as ledger.py does for Reddit:
-    sent_today()       people DMed (or possibly DMed) since local midnight, across every run and by hand
+    sent_today()       DMs sent (or possibly sent) since local midnight, across every run and by hand: each
+                       person's first DM, plus their follow-up if that went out today
     skip_reason(u)     why u must not be DMed now: already sent / no such account -> never; last attempt
                        uncertain or interrupted -> held; max attempts failed -> given up
     lock()             one run at a time on the Chrome profile (send.py, and run.py reading posts or replies)
@@ -53,12 +64,14 @@ CONTACTED = DATA / "contacted.csv"
 LOCK = DATA / "send.lock"
 POSTS = DATA / "posts.json"
 REPLIES = DATA / "replies.csv"
-REPLY_FIELDS = ["username", "item_id", "replied_at", "snippet", "thread_url", "sent_at", "found_at", "how"]
+REPLY_FIELDS = ["username", "item_id", "replied_at", "snippet", "text", "thread_url", "sent_at", "found_at", "how"]
 FIELDS = ["username", "lead_key", "status", "timestamp", "note"]
 QUEUE_STATUSES = ("approved", "unapproved", "sent", "skipped", "not_relevant")
 SEND_STATUSES = ("submitting", "uncertain", "refused", "recipient", "not_submitted", "cleared",
                  "login", "rate_limited", "restricted")
-STATUSES = QUEUE_STATUSES + SEND_STATUSES
+FOLLOWUP_STATUSES = ("followup_submitting", "followup_sent", "followup_uncertain", "followup_failed")
+FOLLOWUP_DONE = ("followup_submitting", "followup_sent", "followup_uncertain")   # it went, or may have: never again
+STATUSES = QUEUE_STATUSES + SEND_STATUSES + FOLLOWUP_STATUSES
 FINAL = {"sent": "already sent", "recipient": "Instagram says there is no such account"}
 HELD = ("uncertain", "submitting")       # the last row being one of these holds the person
 ATTEMPTS = ("not_submitted", "refused", "uncertain")
@@ -96,16 +109,30 @@ def save_posts(posts: dict) -> None:
     _save_json(POSTS, posts)
 
 
+def _reply_header() -> list[str]:
+    with open(REPLIES, newline="") as f:
+        return next(csv.reader(f), [])
+
+
 def load_replies() -> list[dict]:
+    """Every row of data/replies.csv, each with every REPLY_FIELDS key (an older file without `text` gives the
+    snippet as the text)."""
     if not REPLIES.exists():
         return []
     with open(REPLIES, newline="") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    for r in rows:
+        for k in REPLY_FIELDS:
+            if r.get(k) is None:
+                r[k] = (r.get("snippet") or "") if k == "text" else ""
+    return rows
 
 
 def add_replies(rows: list[dict]) -> list[dict]:
-    """Append the replies whose item_id isn't in data/replies.csv yet; returns the ones added."""
-    seen = {r["item_id"] for r in load_replies()}
+    """Append the replies whose item_id isn't in data/replies.csv yet; returns the ones added. A file written
+    before a column existed is rewritten with the current header first (atomically), so columns never shift."""
+    old = load_replies()
+    seen = {r["item_id"] for r in old}
     fresh = []
     for r in rows:
         if r["item_id"] not in seen:
@@ -113,6 +140,13 @@ def add_replies(rows: list[dict]) -> list[dict]:
             fresh.append(r)
     if fresh:
         DATA.mkdir(exist_ok=True)
+        if REPLIES.exists() and _reply_header() != REPLY_FIELDS:
+            fd, tmp = tempfile.mkstemp(dir=DATA, suffix=".tmp")
+            with os.fdopen(fd, "w", newline="") as f:
+                w = csv.DictWriter(f, REPLY_FIELDS)
+                w.writeheader()
+                w.writerows({k: r.get(k, "") for k in REPLY_FIELDS} for r in old)
+            os.replace(tmp, REPLIES)
         new = not REPLIES.exists()
         with open(REPLIES, "a", newline="") as f:
             w = csv.DictWriter(f, REPLY_FIELDS)
@@ -172,10 +206,33 @@ def history() -> dict[str, list[dict]]:
     return by_user
 
 
+def is_followup(row: dict) -> bool:
+    return row["status"] in FOLLOWUP_STATUSES
+
+
+def dm_rows(rows: list[dict]) -> list[dict]:
+    """A person's rows about the first DM: everything but follow-up rows (followup.py)."""
+    return [r for r in rows if not is_followup(r)]
+
+
+def followup_rows(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if is_followup(r)]
+
+
+def followup_key(username: str) -> str:
+    """The lead_key of a follow-up row: never a real lead's key, so handled() and the review page don't see it."""
+    return f"followup:{username.lower()}"
+
+
 def messaged(hist: dict | None = None) -> set[str]:
     """People never to be offered again: sent, no such account, or a send that may have gone out."""
     hist = history() if hist is None else hist
-    return {u for u, rows in hist.items() if any(r["status"] in FINAL for r in rows) or rows[-1]["status"] in HELD}
+    out = set()
+    for u, rows in hist.items():
+        mine = dm_rows(rows)
+        if mine and (any(r["status"] in FINAL for r in mine) or mine[-1]["status"] in HELD):
+            out.add(u)
+    return out
 
 
 def sent_at(hist: dict | None = None) -> dict[str, str]:
@@ -191,26 +248,35 @@ def handled() -> dict[str, str]:
 
 
 def sent_today() -> int:
-    """People DMed today, each once, across every run and by hand. Still-unresolved uncertain or interrupted
-    sends from today count too, since they may have gone out; one resolved --not-sent doesn't."""
+    """DMs sent today across every run and by hand: each person's first DM once, plus their follow-up
+    (followup.py) if it went out today. Still-unresolved uncertain or interrupted sends from today count too,
+    since they may have gone out; one resolved --not-sent (or a follow-up that failed before Send) doesn't."""
     today = date.today().isoformat()
     n = 0
     for rows in history().values():
-        if any(r["status"] == "sent" and r["timestamp"].startswith(today) for r in rows):
+        mine, extra = dm_rows(rows), followup_rows(rows)
+        if any(r["status"] == "sent" and r["timestamp"].startswith(today) for r in mine):
             n += 1
-        elif rows[-1]["status"] in HELD and rows[-1]["timestamp"].startswith(today):
+        elif mine and mine[-1]["status"] in HELD and mine[-1]["timestamp"].startswith(today):
+            n += 1
+        if any(r["status"] in FOLLOWUP_DONE and r["timestamp"].startswith(today) for r in extra) \
+                and extra[-1]["status"] != "followup_failed":
             n += 1
     return n
 
 
 def held() -> dict[str, dict]:
-    """{username: last row} for everyone whose last send's outcome is unknown."""
-    return {u: rows[-1] for u, rows in history().items()
-            if rows[-1]["status"] in HELD and not any(r["status"] in FINAL for r in rows)}
+    """{username: last row} for everyone whose last send's outcome is unknown (follow-up rows aside)."""
+    out = {}
+    for u, rows in history().items():
+        mine = dm_rows(rows)
+        if mine and mine[-1]["status"] in HELD and not any(r["status"] in FINAL for r in mine):
+            out[u] = mine[-1]
+    return out
 
 
 def skip_reason(username: str, max_attempts: int = MAX_ATTEMPTS, hist: dict | None = None) -> str | None:
-    mine = (history() if hist is None else hist).get(username.lower(), [])
+    mine = dm_rows((history() if hist is None else hist).get(username.lower(), []))
     for r in mine:
         if r["status"] in FINAL:
             return f"{FINAL[r['status']]} ({r['timestamp']})"

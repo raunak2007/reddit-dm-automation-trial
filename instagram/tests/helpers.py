@@ -1,7 +1,8 @@
 """helpers.py - what the instagram tests share.
 
 StoreTest   each test gets an empty data/ folder of its own (store.py's paths point into a temp dir) and runs in
-            that dir, so failed-step screenshots and DOM listings land there instead of in the repo
+            that dir, so failed-step screenshots and DOM listings land there instead of in the repo. The shared
+            inbox record (the repo root's inbox/store.py, as self.answers) points into the temp dir too.
 config()    config.json's shape with every delay at 0
 FakeChrome  a stand-in driver that answers direct.py's page helpers (notice, composer, has, follow, following)
             from a dict of pages: {url: {"text": what the page says, "composer": True, "redirect": url,
@@ -11,7 +12,8 @@ FakeChrome  a stand-in driver that answers direct.py's page helpers (notice, com
 FakeAPI     a FakeChrome that also answers comments.api's in-page fetches from a dict of fake JSON answers:
             {"<path prefix after /api/v1/>": dict (200 + that JSON), (status, body), or a function of the full
             URL returning either}. The longest matching prefix wins; anything else is a 404. fetched lists every
-            URL asked for.
+            URL asked for; posted lists (URL, form body) for the form POSTs (comments.api's form=), whose answer
+            function gets "<URL>?<form body>".
 """
 from __future__ import annotations
 
@@ -28,8 +30,10 @@ from unittest import mock
 
 FOLDER = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(FOLDER))
+sys.path.insert(1, str(FOLDER.parent))           # the repo root: inbox/store.py, send_dm.py
 
 import store  # noqa: E402
+from inbox import store as answers  # noqa: E402
 
 SENDER = "100"
 IG = "https://www.instagram.com"
@@ -123,16 +127,18 @@ class FakeChrome:
 class FakeAPI(FakeChrome):
     def __init__(self, answers=None, grid=None, **kw):
         super().__init__(**kw)
-        self.answers, self.grid, self.fetched = answers or {}, grid or [], []
+        self.answers, self.grid, self.fetched, self.posted = answers or {}, grid or [], [], []
         self.current_url = f"{IG}/"
 
-    def execute_async_script(self, script, url, app_id):
+    def execute_async_script(self, script, url, app_id, form=None):
         self.fetched.append(url)
+        if form is not None:
+            self.posted.append((url, form))
         path = url.split("/api/v1/", 1)[1]
         keys = sorted((k for k in self.answers if path.startswith(k)), key=len, reverse=True)
         answer = self.answers[keys[0]] if keys else (404, "{}")
         if callable(answer):
-            answer = answer(url)
+            answer = answer(url if form is None else f"{url}?{form}")
         status, body = answer if isinstance(answer, tuple) else (200, json.dumps(answer))
         return {"status": status, "body": body}
 
@@ -166,6 +172,10 @@ class StoreTest(unittest.TestCase):
                             ("LOCK", data / "send.lock"), ("POSTS", data / "posts.json"),
                             ("REPLIES", data / "replies.csv")):
             self.patch(store, name, value)
+        inbox = self.tmp / "inbox"
+        for name, value in (("DATA", inbox), ("ANSWERS", inbox / "answers.json"), ("LOCK", inbox / "answers.lock")):
+            self.patch(answers, name, value)
+        self.answers = answers
         cwd = os.getcwd()
         os.chdir(self.tmp)
         self.addCleanup(os.chdir, cwd)

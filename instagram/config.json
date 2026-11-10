@@ -2,7 +2,7 @@
   "business": {
     "name": "Aristo Scholars",
     "website": "https://aristoscholars.com",
-    "booking_link": "https://aristoscholars.com/#get-started",
+    "booking_link": "https://aristoscholars.com/?utm_source=instagram&utm_medium=dm#get-started",
     "sender_first_name": "Ameer",
     "services": [
       "1:1 college admissions counseling",
@@ -51,7 +51,23 @@
     "max_delay_seconds": 180,
     "max_attempts_per_recipient": 3,
     "minor_policy": "skip",
-    "queue_port": 8766
+    "queue_port": 8766,
+    "followup": {
+      "enabled": false,
+      "after_days": 6,
+      "max_per_run": 5,
+      "template": "hey {first_name}! just bumping my msg in case it got buried - still happy to help with {topic} if you want: {booking_link}"
+    }
+  },
+
+  "answers": {
+    "max_per_run": 10
+  },
+
+  "livecheck": {
+    "profile": "",
+    "chat": "",
+    "timeout_minutes": 10
   },
 
   "browser": {

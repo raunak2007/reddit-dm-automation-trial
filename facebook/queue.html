@@ -76,6 +76,12 @@ const LABEL = { sent: "DM sent", commented: "Commented", skipped: "Skipped", not
                 comment_held: "HELD: the automatic comment may have been posted. The next comment run checks the post",
                 comment_closed: "The post doesn't take comments from this account",
                 recipient: "Facebook says this person isn't available" };
+// The follow-up (followup.py) to a lead that was sent; it doesn't change the lead's status above.
+const FOLLOWUP = { followup_sent: "Follow-up sent", followup_submitting: "Follow-up may have gone out (interrupted after Send)",
+                   followup_uncertain: "Follow-up may have gone out (couldn't be confirmed)",
+                   followup_refused: "Follow-up refused by Facebook; no other follow-up",
+                   followup_not_submitted: "Follow-up failed before sending; retried on a later run",
+                   followup_stopped: "Follow-up run stopped before sending; retried on a later run" };
 const tabHas = (k, l) => k === "all" || (k === "done" ? DONE.has(l.status) : k === "approved" ? SENDING.has(l.status) : l.status === k);
 let data = { leads: [] }, tab = "todo";
 try { tab = localStorage.getItem("tab") || "todo"; } catch (e) {}
@@ -117,6 +123,7 @@ function card(l) {
     ${!l.author_key ? `<div class="warn">Couldn't read this author's profile link. Open the post and message them from there.</div>` : ""}
     ${done ? `<div class="status">${esc(LABEL[l.status] || l.status)}</div>` : ""}
     ${l.why ? `<div class="sub">${esc(l.why)}</div>` : ""}
+    ${l.followup ? `<div class="sub">${esc(FOLLOWUP[l.followup.status] || l.followup.status)} (${esc(l.followup.at)})</div>` : ""}
     ${l.dm_allowed ? `<label>Private message <span class="count" data-count="dm"></span></label>
     <textarea data-field="dm" ${done ? "readonly" : ""}>${esc(l.dm)}</textarea>` : ""}
     <label>Public comment <span class="count" data-count="comment"></span></label>

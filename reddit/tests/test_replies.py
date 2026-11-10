@@ -1,5 +1,6 @@
 """test_replies.py - finding replies from people in contacted.csv in a fake inbox: who counts, dedupe by message id,
-nothing marked read, contacted.csv left alone, and stopping on account-wide problems.
+nothing marked read, contacted.csv left alone, stopping on account-wide problems, and the full text column (capped,
+with files from before it still readable).
 
     venv/bin/python -m unittest discover reddit/tests
 """
@@ -87,6 +88,37 @@ class Run(LedgerTest):
         driver = FakeDriver(self.inbox(message("m1", "lead_one")), logged_in_as="someone_else")
         self.assertEqual(replies.run(config(), root_config(), driver=driver), 2)
         self.assertNotIn(replies.INBOX, driver.visited)
+
+
+class FullText(LedgerTest):
+    OLD = ["message_id", "username", "kind", "received_at", "subject", "snippet", "permalink", "recorded_at"]
+
+    def test_the_whole_body_is_kept_with_its_line_breaks_and_capped(self):
+        self.mark("a_person", "sent", datetime.now() - timedelta(days=1))
+        body = "Thanks so much!\n\nCould you look at my essay? " + "x" * 6000
+        rows = replies.match([message("m1", "a_person", body=body)], store.first_sent(), set())
+        self.assertTrue(rows[0]["text"].startswith("Thanks so much!\n\nCould you"))
+        self.assertEqual(len(rows[0]["text"]), store.TEXT_CAP)
+        self.assertLessEqual(len(rows[0]["snippet"]), 160)
+        store.add_replies([dict(rows[0], recorded_at="now")])
+        self.assertEqual(store.load_replies()[0]["text"], rows[0]["text"], "survives the csv round trip")
+
+    def test_old_files_read_with_the_snippet_as_text_and_upgrade_on_the_next_write(self):
+        import csv
+        store.DATA.mkdir()
+        with open(store.REPLIES, "w", newline="") as f:
+            w = csv.DictWriter(f, self.OLD)
+            w.writeheader()
+            w.writerow({"message_id": "t4_old", "username": "a", "kind": "message", "snippet": "old snippet",
+                        "permalink": "p", "recorded_at": "then"})
+        self.assertEqual(store.load_replies()[0]["text"], "old snippet")
+        store.add_replies([{"message_id": "t4_new", "username": "b", "kind": "message", "snippet": "s",
+                            "text": "the full new one", "permalink": "q", "recorded_at": "now"}])
+        with open(store.REPLIES, newline="") as f:
+            self.assertEqual(next(csv.reader(f)), store.REPLY_FIELDS)
+        got = {r["message_id"]: r for r in store.load_replies()}
+        self.assertEqual((got["t4_old"]["text"], got["t4_old"]["permalink"]), ("old snippet", "p"))
+        self.assertEqual((got["t4_new"]["text"], got["t4_new"]["permalink"]), ("the full new one", "q"))
 
 
 if __name__ == "__main__":

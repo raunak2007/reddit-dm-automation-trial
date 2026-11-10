@@ -19,7 +19,8 @@ ledger.py import-checkmarks).
 With outreach.auto_approve (the default) they are then sent the way run_loop.py sends a queue, with the same code:
 ledger.lock() (one sending run at a time across every Reddit script), ledger.prepare() (logged in as the root
 config.json's sender_username, this account's sent folder pulled into contacted.csv), ledger.send_loop() (the
-daily cap daily_limit_per_account counted across every run, delays, a 'submitting' row before Send, stops on
+daily cap daily_limit_per_account counted across every run (this folder's follow-ups, data/followups.csv,
+are taken off it first), delays, a 'submitting' row before Send, stops on
 account-wide problems and failure streaks) and ledger.report(). With auto_approve false nothing is sent: review
 the queue and send it yourself.
 
@@ -174,7 +175,7 @@ def print_list(cfg: dict, cfg_root: dict):
     shown = [(l, why) for l, why in skipped if not why.startswith("score")]
     for lead, why in shown:
         print(f"  [skip] u/{lead.get('author', '?'):<24} {why}")
-    print(f"\n{len(out)} would be sent (up to the daily cap: {ledger.sent_today()}/"
+    print(f"\n{len(out)} would be sent (up to the daily cap: {store.sent_today()}/"
           f"{cfg_root['daily_limit_per_account']} today); {len(skipped)} not, "
           f"{len(skipped) - len(shown)} of them for their score")
 
@@ -199,26 +200,39 @@ def run(cfg: dict, cfg_root: dict | None = None, make_driver=None, send=None) ->
     cap = cfg_root["daily_limit_per_account"]
     targets = [(user, link) for _, user, _, _, link in out]
     with ledger.lock():
-        if ledger.sent_today() >= cap:
-            print(f"[+] Already sent {ledger.sent_today()}/{cap} today. Nothing more until tomorrow.")
+        if store.sent_today() >= cap:
+            print(f"[+] Already sent {store.sent_today()}/{cap} today (follow-ups included). Nothing more until "
+                  f"tomorrow.")
             return 0
+        loop_cfg = cfg_root                         # ledger.sent_today() already counts today's follow-ups
         driver = (make_driver or browser.make_driver)(cfg)
         try:
-            if cfg_root.get("sender_username"):          # stop before prepare() syncs anything if logged out
-                try:
-                    browser.check_login(driver, cfg_root)
-                except AccountBlocked as exc:
-                    print(f"[stopped] Not sending ({exc.kind}): {exc}")
-                    return 2
-            try:
-                sender = ledger.prepare(driver, cfg_root)
-            except SystemExit as exc:
-                print(exc.code if isinstance(exc.code, str) else f"[stopped] ledger.prepare exited ({exc.code})")
-                return 2 if exc.code == 2 or str(exc.code).startswith("Not sending (") else 1
-            counts = ledger.send_loop(driver, targets, cfg_root, sender, **({"send": send} if send else {}))
+            sender, code = start(driver, cfg_root)
+            if not sender:
+                return code
+            counts = ledger.send_loop(driver, targets, loop_cfg, sender, **({"send": send} if send else {}))
         finally:
             driver.quit()
     return ledger.report(counts)
+
+
+def start(driver, cfg_root: dict):
+    """The start of every sending run here (send, answer, followup): logged in as the root config's
+    sender_username (checked before anything is synced), then ledger.prepare() (the same check, and this
+    account's sent folder pulled into contacted.csv). Returns (sender, 0), or (None, exit code): 2 when Reddit is
+    refusing the account (logged out, wrong account, rate-limited, restricted), 1 for a setup problem such as a
+    missing sender_username."""
+    if cfg_root.get("sender_username"):
+        try:
+            browser.check_login(driver, cfg_root)
+        except AccountBlocked as exc:
+            print(f"[stopped] Not sending ({exc.kind}): {exc}")
+            return None, 2
+    try:
+        return ledger.prepare(driver, cfg_root), 0
+    except SystemExit as exc:
+        print(exc.code if isinstance(exc.code, str) else f"[stopped] ledger.prepare exited ({exc.code})")
+        return None, 2 if exc.code == 2 or str(exc.code).startswith("Not sending (") else 1
 
 
 def main():

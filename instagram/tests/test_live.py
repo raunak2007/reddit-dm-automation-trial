@@ -9,6 +9,8 @@ its block patterns fire on ordinary pages.
     IG_LIVE=1 IG_LIVE_PROFILE=<username> ...   also find the Follow button on that profile, without pressing it
     IG_LIVE=1 IG_LIVE_PROFILE=<username> IG_LIVE_FOLLOW=1 ...   and press it (a real follow; use a test account)
     IG_LIVE=1 IG_LIVE_CHAT=<username> ...      also open the chat with them and check its box
+    IG_LIVE_READONLY=1                         press nothing at all: no Follow (IG_LIVE_FOLLOW is ignored) and no
+                                               "Not Now" on a notifications dialog. python run.py livecheck sets it.
 
 Close send.py / run.py first: Chrome won't open the same profile twice. A failed check saves its screenshot and
 page listing (step*_failed.png / _dom.txt) in debug/live/; when the markup changed, copy it into mock_site.py so
@@ -28,7 +30,8 @@ from send_dm import step
 
 LIVE = os.environ.get("IG_LIVE") == "1"
 PROFILE = os.environ.get("IG_LIVE_PROFILE", "").lower().removeprefix("@")
-FOLLOW = os.environ.get("IG_LIVE_FOLLOW") == "1"
+READONLY = os.environ.get("IG_LIVE_READONLY") == "1"
+FOLLOW = os.environ.get("IG_LIVE_FOLLOW") == "1" and not READONLY
 CHAT = os.environ.get("IG_LIVE_CHAT", "").lower().removeprefix("@")
 OUT = helpers.FOLDER / "debug" / "live"
 cfg = driver = None
@@ -72,7 +75,8 @@ class LiveInstagram(unittest.TestCase):
         with step(driver, "live_inbox", "opening the Direct inbox"):
             driver.get(direct.INBOX)
             browser.pause(cfg, 0.6)
-            direct.dismiss_dialogs(driver)
+            if not READONLY:
+                direct.dismiss_dialogs(driver)
             direct.check_account(driver)
 
     @unittest.skipUnless(PROFILE, "set IG_LIVE_PROFILE to check a profile's Follow button")
@@ -81,7 +85,8 @@ class LiveInstagram(unittest.TestCase):
             driver.get(f"{direct.IG}/{PROFILE}/")
             direct.wait_for(driver, lambda d: direct.check_account(d) or direct.js(d, "following")
                             or direct.js(d, "follow"), f"@{PROFILE}'s Follow / Following button")
-            direct.dismiss_dialogs(driver)
+            if not READONLY:
+                direct.dismiss_dialogs(driver)
             follow, following = direct.js(driver, "follow"), direct.js(driver, "following")
             print(f"\n    @{PROFILE}: {len(follow)} Follow button(s), already following/requested: {following}")
             self.assertTrue(following or len(follow) == 1,

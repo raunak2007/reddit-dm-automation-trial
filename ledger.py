@@ -65,6 +65,8 @@ MAX_ATTEMPTS = 3            # attempts before a recipient is given up on
 MAX_FAILS_IN_A_ROW = 3      # not_submitted in a row: usually the account or the page, not the recipients
 MAX_REFUSALS_IN_A_ROW = 3   # refusals from several unrelated recipients in a row
 MAX_UNCERTAIN_IN_A_ROW = 2  # sends that can't be confirmed in a row: stop before making it worse
+FOLLOWUPS = HERE / "reddit" / "data" / "followups.csv"   # reddit/followup.py's own record (not this ledger)
+FOLLOWUP_COUNTED = ("sent", "submitting", "uncertain")    # follow-ups that went out, or may have
 RESOLVE_AFTER = 15 * 60     # seconds: a held send younger than this may not be in the sent folder yet
 OLD_STATUS = {"failed": "not_submitted", "error": "not_submitted", "account": "restricted"}
 
@@ -360,9 +362,15 @@ def prepare(driver, cfg):
 def sent_today():
     """Recipients that got a message today, each once, across every run (rebuilt from contacted.csv, so
     nothing resets between runs). Still-unresolved uncertain or interrupted submissions from today count
-    too, since they may have gone out; one resolved --not-sent (a later 'cleared' row) doesn't."""
+    too, since they may have gone out; one resolved --not-sent (a later 'cleared' row) doesn't. Today's
+    follow-ups from reddit/data/followups.csv count too (one per person), so every Reddit script shares one cap."""
     today = date.today().isoformat()
     users = set()
+    if FOLLOWUPS.exists():
+        with open(FOLLOWUPS, newline="") as f:
+            followed = {key(r["username"]) for r in csv.DictReader(f)
+                        if r.get("status") in FOLLOWUP_COUNTED and r.get("timestamp", "").startswith(today)}
+        users |= {f"followup:{u}" for u in followed}
     for user, rows in _history().items():
         if any(r["status"] == "sent" and r["timestamp"].startswith(today) for r in rows):
             users.add(user)

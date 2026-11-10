@@ -1,6 +1,7 @@
 """test_discover.py - how `python run.py` finds posts on its own (discover.py), with fake answers from Instagram's web
-API (helpers.FakeAPI) in place of instagram.com: reading the media feed, the lookback and max_posts, remembering
-which posts were read, the profile-page fallback, and stopping with exit code 2 on an account-wide problem.
+API (helpers.FakeAPI) in place of instagram.com: reading the media feed and the reels (clips/user/), the lookback
+and max_posts, remembering which posts were read, the profile-page fallback, and stopping with exit code 2 on an
+account-wide problem.
 
     cd instagram && ../venv/bin/python -m unittest tests/test_discover.py
 """
@@ -114,7 +115,8 @@ class FromApi(StoreTest):
     def test_profile_grid_fallback_reads_post_links(self):
         fake = FakeAPI(grid=[{"kind": "p", "code": "G1"}, {"kind": "reel", "code": "G2"}])
         posts = discover.from_page(fake, cfg(), "me.test")
-        self.assertEqual(fake.visited, [f"{direct.IG}/me.test/"])
+        self.assertEqual(fake.visited, [f"{direct.IG}/me.test/", f"{direct.IG}/me.test/reels/"],
+                         "the profile grid, then its Reels tab")
         self.assertEqual([(p["shortcode"], p["url"], p["taken_at"]) for p in posts],
                          [("G1", "https://www.instagram.com/p/G1/", None), ("G2", "https://www.instagram.com/reel/G2/", None)])
 
@@ -276,12 +278,98 @@ class RunAndRemember(StoreTest):
             discover.run(cfg())
         self.assertEqual(self.fake.fetched, [])
 
-    def test_only_reads_with_get_requests(self):
+    def test_only_reads_with_get_requests_except_the_reels_form(self):
         discover.run(cfg())
         self.assertNotIn("method", comments._FETCH, "the in-page fetch is a plain GET")
         self.assertTrue(self.fake.fetched)
+        gets = [u for u in self.fake.fetched if u not in {url for url, _ in self.fake.posted}]
         self.assertTrue(all(u.startswith("https://www.instagram.com/api/v1/users/web_profile_info/") or
-                            u.startswith(f"https://www.instagram.com/api/v1/feed/user/{ME_ID}/") for u in self.fake.fetched))
+                            u.startswith(f"https://www.instagram.com/api/v1/feed/user/{ME_ID}/") or
+                            u.startswith("https://www.instagram.com/api/v1/clips/user/?") for u in gets), gets)
+        self.assertEqual({url for url, _ in self.fake.posted}, {"https://www.instagram.com/api/v1/clips/user/"})
+
+    def test_api_refuses_a_post_to_anything_but_a_read_endpoint(self):
+        for path in ("friendships/create/1/", "direct_v2/threads/1/items/2/seen/", "web/likes/1/like/",
+                     "direct_v2/threads/1/approve/"):
+            with self.subTest(path):
+                with self.assertRaises(ValueError):
+                    comments.api(self.fake, path, form={"x": "1"})
+        self.assertEqual(self.fake.posted, [])
+
+
+def clip(code, days_ago, comments_n=3, *, pinned=False, now=NOW):
+    """One reel as clips/user/ gives it: wrapped in {"media": ...}."""
+    media = item(code, days_ago, comments_n, reel=True, now=now)
+    if pinned:
+        media["clips_tab_pinned_user_ids"] = [int(ME_ID)]
+    return {"media": media}
+
+
+class Reels(StoreTest):
+    """Reels shared only to the Reels tab aren't in feed/user/: clips/user/ finds them."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(browser, "pause", lambda *a: None)
+
+    def fake(self, feed, clip_pages, **answers):
+        def clips(url):
+            n = int(url.split("max_id=c")[1].split("&")[0]) if "max_id=c" in url else 0
+            return {"items": clip_pages[n], "paging_info": {"more_available": n + 1 < len(clip_pages),
+                                                            "max_id": f"c{n + 1}"}, "status": "ok"}
+        return FakeAPI({"users/web_profile_info/": profile_info(),
+                        f"feed/user/{ME_ID}/": {"items": feed, "more_available": False},
+                        "clips/user/": clips, **answers})
+
+    def test_reels_are_added_once_with_reel_links(self):
+        fake = self.fake([item("POST1", 1), item("BOTH", 2, reel=True)],
+                         [[clip("BOTH", 2), clip("ONLYREEL", 3)]])
+        posts = discover.from_api(fake, cfg(), "me.test", NOW - timedelta(days=7))
+        self.assertEqual([p["shortcode"] for p in posts], ["POST1", "BOTH", "ONLYREEL"], "BOTH is kept once")
+        only = posts[-1]
+        self.assertEqual(only["url"], "https://www.instagram.com/reel/ONLYREEL/")
+        self.assertEqual((only["owner"], only["comment_count"]), ("me.test", 3))
+        [(url, form)] = fake.posted
+        self.assertEqual(url, "https://www.instagram.com/api/v1/clips/user/")
+        self.assertIn(f"target_user_id={ME_ID}", form)
+
+    def test_reels_page_until_older_than_the_lookback_and_an_old_pinned_one_doesnt_stop_it(self):
+        fake = self.fake([], [[clip("PIN", 200, pinned=True), clip("R1", 1)], [clip("R2", 5), clip("R3", 9)],
+                              [clip("R4", 12)]])
+        posts = discover.from_api(fake, cfg(), "me.test", NOW - timedelta(days=7))
+        self.assertEqual([p["shortcode"] for p in posts], ["PIN", "R1", "R2", "R3"])
+        self.assertEqual(len(fake.posted), 2)
+        self.assertIn("max_id=c1", fake.posted[1][1])
+
+    def test_post_not_answering_asks_with_a_get(self):
+        fake = self.fake([item("POST1", 1)], [[clip("R1", 1)]])
+        clips = fake.answers["clips/user/"]
+        posting = lambda: fake.posted and fake.posted[-1][0] == fake.fetched[-1]   # noqa: E731 (this call a POST?)
+        fake.answers["clips/user/"] = lambda url: (405, "{}") if posting() else clips(url)
+        posts = discover.from_api(fake, cfg(), "me.test", NOW - timedelta(days=7))
+        self.assertEqual([p["shortcode"] for p in posts], ["POST1", "R1"])
+        self.assertEqual(len(fake.posted), 1, "one POST, then GETs")
+        self.assertTrue(any(u.startswith("https://www.instagram.com/api/v1/clips/user/?target_user_id=")
+                            for u in fake.fetched))
+
+    def test_reels_endpoint_silent_leaves_the_feed(self):
+        fake = self.fake([item("POST1", 1)], [[]])
+        fake.answers["clips/user/"] = (404, "{}")
+        self.assertEqual([p["shortcode"] for p in discover.from_api(fake, cfg(), "me.test", NOW)], ["POST1"])
+
+    def test_reels_count_toward_max_posts_and_the_lookback(self):
+        fake = self.fake([item("P1", 1)], [[clip("R1", 0.5), clip("R2", 2), clip("ROLD", 10)]])
+        found = discover.find(fake, cfg(max_posts=2), NOW - timedelta(days=7))
+        read, skip = discover.select(found, {}, cfg(max_posts=2), NOW)
+        self.assertEqual([p["shortcode"] for p in read], ["R1", "P1"])
+        self.assertEqual({p["shortcode"]: why[:10] for p, why in skip}, {"R2": "past disco", "ROLD": "older than"})
+
+    def test_a_block_from_the_reels_endpoint_is_account_wide(self):
+        fake = self.fake([item("P1", 1)], [[]])
+        fake.answers["clips/user/"] = (400, '{"message":"feedback_required"}')
+        with self.assertRaises(AccountBlocked) as stop:
+            discover.from_api(fake, cfg(), "me.test", NOW)
+        self.assertEqual(stop.exception.kind, "rate_limited")
 
 
 class ReadPost(StoreTest):

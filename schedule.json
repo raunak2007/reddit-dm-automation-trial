@@ -1,7 +1,19 @@
 {
   "time": "10:00",
   "timeout_minutes": 120,
+  "cleanup_days": 14,
   "jobs": [
+    {
+      "name": "reddit",
+      "dir": ".",
+      "run": [
+        "reddit/run.py",
+        "livecheck"
+      ],
+      "role": "livecheck",
+      "weekly": "monday",
+      "enabled": true
+    },
     {
       "name": "reddit",
       "dir": ".",
@@ -20,6 +32,35 @@
       "enabled": true
     },
     {
+      "name": "reddit",
+      "dir": ".",
+      "run": [
+        "reddit/run.py",
+        "answer"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "reddit",
+      "dir": ".",
+      "run": [
+        "reddit/run.py",
+        "followup"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "facebook",
+      "dir": "facebook",
+      "run": [
+        "run.py",
+        "livecheck"
+      ],
+      "role": "livecheck",
+      "weekly": "monday",
+      "enabled": true
+    },
+    {
       "name": "facebook",
       "dir": "facebook",
       "run": [
@@ -37,6 +78,35 @@
       "enabled": true
     },
     {
+      "name": "facebook",
+      "dir": "facebook",
+      "run": [
+        "run.py",
+        "answer"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "facebook",
+      "dir": "facebook",
+      "run": [
+        "run.py",
+        "followup"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "instagram",
+      "dir": "instagram",
+      "run": [
+        "run.py",
+        "livecheck"
+      ],
+      "role": "livecheck",
+      "weekly": "monday",
+      "enabled": true
+    },
+    {
       "name": "instagram",
       "dir": "instagram",
       "run": [
@@ -51,6 +121,51 @@
         "run.py",
         "replies"
       ],
+      "enabled": true
+    },
+    {
+      "name": "instagram",
+      "dir": "instagram",
+      "run": [
+        "run.py",
+        "answer"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "instagram",
+      "dir": "instagram",
+      "run": [
+        "run.py",
+        "followup"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "inbox",
+      "dir": ".",
+      "run": [
+        "inbox/run.py",
+        "draft"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "bookings",
+      "dir": ".",
+      "run": [
+        "bookings/run.py",
+        "calendly"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "insights",
+      "dir": ".",
+      "run": [
+        "insights/run.py"
+      ],
+      "weekly": "monday",
       "enabled": true
     }
   ]

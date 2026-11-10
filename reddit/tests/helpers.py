@@ -1,8 +1,10 @@
 """helpers.py - what the reddit tests share. Nothing here opens a browser or touches reddit.com.
 
-LedgerTest   each test gets an empty folder of its own: this folder's data/ files (store.py) and the root ledger's
-             contacted.csv, queue_state/ and lock (ledger.py) all point into it, and the test runs in it, so failed-
-             step files land there and the real contacted.csv is never read or written
+LedgerTest   each test gets an empty folder of its own: this folder's data/ files (store.py), the root ledger's
+             contacted.csv, queue_state/ and lock (ledger.py) and the shared inbox's answers.json and lock
+             (inbox/store.py) all point into it, and the test runs in it, so failed-step files land there and the
+             real contacted.csv and answers.json are never read or written
+Sender       a fake send_dm.send_compose: scripted Results, presses (before_submit) for what gets as far as Send
 config()     reddit/config.json's shape with every delay at 0; root_config() the root config.json's
 FakeDriver   a stand-in Chrome: {url: text} pages, where text is what the page's body shows (JSON for Reddit's .json
              URLs). Prefix matches let one entry answer every page of a listing; "redirect" sends a URL elsewhere.
@@ -25,7 +27,8 @@ sys.path.insert(0, str(FOLDER))
 
 import store  # noqa: E402
 import ledger  # noqa: E402
-from send_dm import ME_URL, SENT_URL  # noqa: E402
+from inbox import store as inbox_store  # noqa: E402
+from send_dm import ME_URL, SENT_URL, Result, parse_compose_link  # noqa: E402
 
 SENDER = "aristo_counsel"
 
@@ -112,6 +115,24 @@ class FakeDriver:
         self.quit_called = True
 
 
+class Sender:
+    """A send function for ledger.send_loop / answer.py / followup.py: answers from a script ({username: Result},
+    default 'sent'), presses (before_submit) for every send that gets as far as Send, and remembers who it was
+    called for (and every link)."""
+
+    def __init__(self, answers=None):
+        self.answers, self.calls, self.links = answers or {}, [], []
+
+    def __call__(self, driver, link, *, sender=None, before_submit=None):
+        to = parse_compose_link(link)["to"]
+        self.calls.append(to)
+        self.links.append(parse_compose_link(link))
+        answer = self.answers.get(to, Result("sent", "fake: sent"))
+        if answer.status in ("sent", "uncertain"):
+            before_submit()
+        return answer
+
+
 class LedgerTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -119,10 +140,14 @@ class LedgerTest(unittest.TestCase):
         self.tmp = Path(tmp.name)
         data, state = self.tmp / "data", self.tmp / "queue_state"
         for name, value in (("DATA", data), ("LEADS", data / "leads.json"), ("QUEUE", data / "queue.html"),
-                            ("REPLIES", data / "replies.csv")):
+                            ("REPLIES", data / "replies.csv"), ("FOLLOWUPS", data / "followups.csv")):
             self.patch(store, name, value)
+        inbox = self.tmp / "inbox"
+        for name, value in (("DATA", inbox), ("ANSWERS", inbox / "answers.json"), ("LOCK", inbox / "answers.lock")):
+            self.patch(inbox_store, name, value)
         for name, value in (("LOG", self.tmp / "contacted.csv"), ("STATE", state),
-                            ("IMPORTS", state / "checkmark_imports.json"), ("LOCK", state / "send.lock")):
+                            ("IMPORTS", state / "checkmark_imports.json"), ("LOCK", state / "send.lock"),
+                            ("FOLLOWUPS", data / "followups.csv")):
             self.patch(ledger, name, value)
         self.patch(store, "load_root_config", lambda: root_config())
         cwd = os.getcwd()

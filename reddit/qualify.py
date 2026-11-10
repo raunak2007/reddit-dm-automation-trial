@@ -52,11 +52,24 @@ TOOL = {
 }
 
 
-def system_prompt(cfg: dict) -> str:
+def make_client():
+    """The Anthropic client, with ANTHROPIC_API_KEY from the environment or reddit/.env (followup.py uses it too)."""
+    import anthropic
+    from dotenv import load_dotenv
+    load_dotenv(HERE / ".env")
+    return anthropic.Anthropic()
+
+
+def business_values(cfg: dict) -> dict:
+    """The {placeholders} the prompts (and followup.template) may use, from config.json's business block."""
     b = cfg["business"]
-    values = {"business_name": b["name"], "website": b["website"], "booking_link": b["booking_link"],
-              "sender_first_name": b["sender_first_name"], "offer": b["offer"],
-              "services": "\n".join(f"- {s}" for s in b["services"])}
+    return {"business_name": b["name"], "website": b["website"], "booking_link": b["booking_link"],
+            "sender_first_name": b["sender_first_name"], "offer": b["offer"],
+            "services": "\n".join(f"- {s}" for s in b["services"])}
+
+
+def system_prompt(cfg: dict) -> str:
+    values = business_values(cfg)
     parts = [(PROMPTS / name).read_text().format(**values) for name in ("qualify.md", "message.md")]
     return ("\n\n".join(parts) + f"\n\nToday is {datetime.now():%B %d, %Y}. Only posts from the last "
             f"{cfg['search']['lookback_days']} days count. Always answer by calling record_lead.")
@@ -106,10 +119,7 @@ def run(cfg: dict, rescore=False, dry_run=False, client=None) -> int:
         return 0
 
     import anthropic
-    if client is None:
-        from dotenv import load_dotenv
-        load_dotenv(HERE / ".env")
-        client = anthropic.Anthropic()
+    client = client or make_client()
     hits = 0
     print(f"[+] Scoring {len(todo)} posts with {cfg['ai']['model']}...")
     try:

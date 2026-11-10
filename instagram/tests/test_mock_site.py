@@ -19,10 +19,12 @@ from helpers import config
 from mock_site import MockSite, chat_page, grid_page, headless_chrome, inbox_page, profile_page
 from selenium.common.exceptions import TimeoutException
 
+import answer
 import direct
 import discover
 import replies
 import send_dm
+from inbox import store as answers
 from send_dm import AccountBlocked, NoSuchUser
 
 site = driver = None
@@ -185,6 +187,56 @@ class Chat(MockInstagram):
         direct.check_recipient(driver, USER)
 
 
+class Answer(MockInstagram):
+    """answer.py's send of one approved answer through direct.py's real page code, with the shared inbox record in a
+    temp dir: 'sending' is written right before Send is pressed, the answer goes out once, then 'sent'."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = os.path.join(tmp.name, "inbox")
+        for name, value in (("DATA", root), ("ANSWERS", os.path.join(root, "answers.json")),
+                            ("LOCK", os.path.join(root, "answers.lock"))):
+            p = mock.patch.object(answers, name, answers.Path(value))
+            p.start()
+            self.addCleanup(p.stop)
+        for p in (mock.patch.object(direct, "chat_link", lambda user: site.url(f"/m/{user}")),
+                  mock.patch.object(direct, "follow", side_effect=AssertionError("followed for an answer"))):
+            p.start()
+            self.addCleanup(p.stop)
+        site.redirects[f"/m/{USER}"] = THREAD
+        e = answers.add_draft("instagram", "item9", person=USER, name="Jane Doe", chat_url=site.url(THREAD),
+                              their_message="how much is it?", our_message=TEXT, draft="it's free! want a time?")
+        self.entry = answers.update(e["id"], status="approved")
+
+    def test_sends_once_marking_sending_before_the_press(self):
+        site.pages[THREAD] = chat_page(site, USER, name="Jane Doe")
+        seen = []
+        real = direct.submit
+
+        def submit(driver_, box, username, about_to_click):
+            def click():
+                about_to_click()
+                seen.append(answers.get(self.entry["id"])["status"])
+            return real(driver_, box, username, click)
+        with mock.patch.object(direct, "submit", submit):
+            status, result = answer.send_one(driver, self.entry, config(), direct.send_message)
+        self.assertEqual(status, "sent", result.reason)
+        self.assertEqual(seen, ["sending"])
+        self.assertEqual(site.sent[THREAD], ["it's free! want a time?"])
+        self.assertEqual(answers.get(self.entry["id"])["status"], "sent")
+
+    def test_a_request_chat_without_a_message_box_fails_and_nothing_is_pressed(self):
+        site.pages[THREAD] = ("<main role=main><a href='/jane.doe/'>jane.doe</a><p>jane.doe wants to send you a "
+                              "message.</p><button>Block</button><button>Delete</button>"
+                              "<button onclick=\"document.title='accepted'\">Accept</button></main>")
+        status, result = answer.send_one(driver, self.entry, config(), direct.send_message)
+        self.assertEqual(status, "failed", result.reason)
+        self.assertEqual(site.sent, {})
+        self.assertNotEqual(driver.title, "accepted", "the request wasn't accepted")
+
+
 class Fallbacks(MockInstagram):
     """The page-reading fallbacks for when Instagram's API doesn't answer: discover.py's profile grid and
     replies.py's chat list, with their real page code."""
@@ -196,6 +248,15 @@ class Fallbacks(MockInstagram):
                          [("POST1", "https://www.instagram.com/p/POST1/"),
                           ("REEL2", "https://www.instagram.com/reel/REEL2/"),
                           ("POST3", "https://www.instagram.com/p/POST3/")], "the nav's post link isn't one")
+
+    def test_reels_tab_adds_the_reels_missing_from_the_grid(self):
+        site.pages["/me.test/"] = grid_page("me.test", ["/me.test/p/POST1/", "/me.test/reel/BOTH/"])
+        site.pages["/me.test/reels/"] = grid_page("me.test", ["/me.test/reel/BOTH/", "/me.test/reel/ONLYREEL/"])
+        posts = discover.from_page(driver, config(), "me.test")
+        self.assertEqual([(p["shortcode"], p["url"]) for p in posts],
+                         [("POST1", "https://www.instagram.com/p/POST1/"),
+                          ("BOTH", "https://www.instagram.com/reel/BOTH/"),
+                          ("ONLYREEL", "https://www.instagram.com/reel/ONLYREEL/")])
 
     def test_profile_grid_with_a_block_stops(self):
         site.pages["/me.test/"] = profile_page("me.test", notifications=False).replace(

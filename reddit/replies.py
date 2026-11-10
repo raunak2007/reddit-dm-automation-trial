@@ -5,7 +5,8 @@ up to --pages pages of 100, each fetched with mark=false so nothing is marked re
 someone the root contacted.csv has as 'sent' (from any Reddit script: run_loop.py, open_queue.py or send.py),
 after the first time they were sent to, counts as a reply: a private message, or a reply to one of this
 account's comments or posts. Each is added to data/replies.csv once (by message id) with the username, when it
-arrived, a short snippet and a permalink, and the run prints a summary.
+arrived, a short snippet, the full text (up to store.TEXT_CAP characters, for drafting an answer) and a
+permalink, and the run prints a summary.
 
 It reads only. It doesn't mark anything read, reply, send, or change contacted.csv. It stops, keeping what it has,
 on the same account-wide signals as scrape.py (logged out, rate-limited, blocked; browser.fetch_json).
@@ -36,6 +37,12 @@ def snippet(text: str, n: int = 160) -> str:
     return text if len(text) <= n else text[:n - 1].rstrip() + "…"
 
 
+def full_text(text: str) -> str:
+    """The whole body, line breaks kept, cut at store.TEXT_CAP characters."""
+    text = (text or "").strip()
+    return text if len(text) <= store.TEXT_CAP else text[:store.TEXT_CAP - 1].rstrip() + "…"
+
+
 def parse_message(child: dict) -> dict | None:
     """One inbox child (t4 private message, t1 comment reply / mention) as a replies.csv row (without
     recorded_at), or None."""
@@ -54,7 +61,7 @@ def parse_message(child: dict) -> dict | None:
     return {"message_id": d["name"], "username": d["author"], "kind": kind,
             "received_at": datetime.fromtimestamp(created).isoformat(timespec="seconds") if created else "",
             "subject": snippet(d.get("subject") or d.get("link_title") or "", 100),
-            "snippet": snippet(d.get("body") or ""), "permalink": link}
+            "snippet": snippet(d.get("body") or ""), "text": full_text(d.get("body") or ""), "permalink": link}
 
 
 def flatten(children: list):

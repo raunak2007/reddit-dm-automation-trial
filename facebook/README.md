@@ -12,7 +12,10 @@ scrape.py ──► data/leads.json ──► qualify.py (Claude) ──► send
 
 queue_server.py (optional): look at leads, edit drafts or skip people before a send
 comment.py (outreach.auto_comment): posts the public comment on leads that won't get a DM
-replies.py: looks in each DMed chat for a reply ──► data/replies.csv
+replies.py: looks in each DMed chat for a reply ──► data/replies.csv ──► ../inbox (drafts answers you approve)
+answer.py: sends the answers you approved on the inbox page into each chat
+followup.py (outreach.followup.enabled): one short follow-up to people who never replied
+livecheck.py: read-only checks on the real site, for a weekly scheduler
 ```
 
 **Every new lead at or above `ai.min_score` is sent its drafted DM** (`outreach.auto_approve`, on
@@ -96,6 +99,11 @@ python comment.py held             comments that couldn't be confirmed
 python comment.py resolve <post_key> --commented | --not-commented
 python run.py replies              look for replies in every DMed chat -> data/replies.csv
 python replies.py --list           who has replied
+python run.py answer               send the answers you approved on the inbox page (../inbox)
+python answer.py --list            approved answers waiting to go
+python run.py followup             one follow-up to people who never replied (off until outreach.followup.enabled)
+python followup.py --list          who would get a follow-up, and why the others won't
+python run.py livecheck            read-only checks on the real site; exit 0 ok, 2 account problem, 1 other
 ```
 
 In the queue (http://127.0.0.1:8765):
@@ -182,6 +190,73 @@ from which side the bubble is on; rows it can't place never count. Each reply is
 checked again next run. Opening a chat marks their messages as seen, as it would by hand. It stops (exit code 2)
 on anything account-wide (logged out, checkpoint, block, chat PIN), or after 5 chats in a row it couldn't read.
 
+`text` holds everything they wrote after our DM (their messages joined with " / ", up to 4000 characters); `snippet`
+is the first 160. A `replies.csv` from before the `text` column still reads (its rows get `text` = `snippet`) and is
+rewritten with the column the next time a reply is added.
+
+After you answer someone from the inbox (status `sent`), later runs open their chat again and add **one row per new
+message** from them after our latest message in the chat (the DM, a follow-up, an answer or anything sent by hand).
+Our own messages never count, a message already recorded since our latest answer isn't recorded again, and each row's
+`seen_at` is unique for that person, since the inbox keys Facebook replies on `author_key:seen_at`. Within
+`replies_per_run`, people whose last reply is older than our latest answer to them go first, then chats never
+checked, then everyone else we've answered.
+
+## Answers (answer.py)
+
+The inbox page (`../inbox`, shared with the Reddit and Instagram folders) drafts answers to replies and you approve
+them there. `python run.py answer` sends the approved Facebook ones, oldest approval first, at most
+`answers.max_per_run` (10) a run, `answers.min_delay_seconds` to `max_delay_seconds` apart:
+
+1. Takes the same lock as `send.py`, then turns any entry a dead run left `sending` into `uncertain` (never resent).
+2. Checks the browser is logged in as `outreach.sender_user_id` and Messenger is usable, as `send.py` does.
+3. For each entry: re-reads it (you may have changed it on the page), opens the chat (the entry's `chat_url`, else
+   the person's Messenger link) and checks it shows their name; if the text is already in the chat it's `sent`.
+   Otherwise it types the text, marks the entry `sending`, presses Send once, and records `sent`, `failed` (not sent:
+   approve it again to retry) or `uncertain` (Send was pressed but it couldn't be confirmed: look in the chat), with
+   the reason. If the text was edited on the page while it was being typed, nothing is sent and it stays approved.
+
+An account-wide problem before Send (logged out, PIN, checkpoint, block) leaves the entry `approved` for the next run
+and stops with exit code 2; so do 3 failures or 2 unconfirmed sends in a row. Answers don't count toward the daily DM
+cap: they go to people who wrote to you.
+
+## Follow-ups (followup.py)
+
+Off unless you set `outreach.followup.enabled` to `true`. `python run.py followup` sends **one** short follow-up, ever,
+to each person whose DM went out at least `after_days` (6) days ago and who:
+
+- isn't in `data/replies.csv` and hasn't been answered from the inbox,
+- hasn't had a follow-up (any `followup_submitting`, `followup_sent`, `followup_uncertain` or `followup_refused` row),
+- isn't someone the AI thinks is under 18 (whatever `minor_policy` says), and whose DM text is in `leads.json`.
+
+Oldest DM first, at most `max_per_run` (5) a run. Right before each one it opens the chat and reads it: if they wrote
+anything after our DM it's recorded in `data/replies.csv` and no follow-up goes; if we wrote something after it (an
+answer by hand) it's skipped; if our DM can't be found in the chat, it's tried next run. Claude drafts it from
+`prompts/followup.md` (short, referring back to the first DM; with `qualify.py`'s model and API key); with
+`use_ai` false, or when Claude can't be reached or the draft is empty or over `max_chars` (500), `template` from
+`config.json` is used. It's sent like a DM (`followup_submitting` row, Send pressed once), and recorded:
+
+| status | meaning |
+|---|---|
+| `followup_sent` | Messenger took it (or it was already in the chat) |
+| `followup_uncertain` | Send was pressed but it couldn't be confirmed; never sent again |
+| `followup_refused` | Facebook won't let this account message them now; not retried |
+| `followup_not_submitted` | failed before Send; retried on a later run |
+| `followup_stopped` | account-wide problem before Send; the run stopped there, retried later |
+
+A follow-up counts toward `outreach.daily_dm_limit` (from `send.py` too). Follow-up rows never change where a lead
+stands: it stays **DM sent** in the queue, which shows the follow-up's status under it. It stops with exit code 2 on
+anything account-wide and on the same streaks as `send.py`.
+
+## Live check (livecheck.py)
+
+`python run.py livecheck` runs `tests/test_live.py` against the real site with `FB_LIVE=1`, taking the optional
+checks from `config.json`'s `livecheck` block (`chat` + `name`: open one chat you've messaged before and read who
+wrote each message; `post` + `post_author` + `post_text`: open one post and find its own comment box) instead of
+environment variables. It only opens and reads pages: nothing is typed, pressed, sent or recorded. Exit code 0 when
+every check passed, 2 when a failure shows an account problem (logged out, wrong account, chat PIN, checkpoint,
+block), 1 otherwise (markup changed, nothing checked). Meant for a weekly scheduler; it takes the same lock as
+`send.py`, so it won't start while a run is using the Chrome profile.
+
 ## Tests
 
 ```bash
@@ -195,21 +270,28 @@ FB_LIVE=1 ../venv/bin/python -m unittest tests/test_live.py -v    # read-only ch
   Send twice for a message already in the chat, settles held sends).
 - `tests/test_comment.py`: which leads get a comment (minors skipped by default, never anyone already DMed or
   commented on), the daily comment cap, a block halting the run (exit 2), held comments, `run.py`'s exit codes.
-- `tests/test_replies.py`: a reply after our DM counts, only our DM or their earlier message doesn't, dedupe, a block.
+- `tests/test_replies.py`: a reply after our DM counts, only our DM or their earlier message doesn't, dedupe, a block,
+  the full `text` column and reading an old `replies.csv` without it.
+- `tests/test_answer.py`: approved inbox answers are sent with `sending` written before the press, already-in-the-chat
+  is `sent`, a chat with someone else fails before typing, blocks before / after Send, stuck entries, the cap, the lock.
+- `tests/test_followup.py`: who gets a follow-up (never twice, never after a reply, an inbox answer or to a likely
+  minor), the chat re-read right before it, the daily DM cap, stops, and that follow-ups leave send.py's statuses alone.
+- `tests/test_livecheck.py`: livecheck's settings and exit codes, and that `test_live.py` never types, presses or records.
 - `tests/test_mock_site.py`: `messenger.py`'s and `comment.py`'s real page code in headless Chrome against mock
   Messenger chats and posts (the post's own comment box, not a reply box or another post's; Enter once), and
   reading who wrote each message in a chat.
 - `tests/test_live.py`: off unless `FB_LIVE=1`. Checks the real profile is logged in as the sender and the
   inbox has no PIN prompt or block. Add `FB_LIVE_CHAT=<author_key> FB_LIVE_NAME="Their Name"` to also open
-  one chat. It never types anything. Run it before the first real `send.py`, and after Facebook changes
+  one chat (or use `python run.py livecheck` with the `livecheck` block in `config.json`). It never types anything. Run it before the first real `send.py`, and after Facebook changes
   something. Failures save their screenshots and page dumps to `debug/live/`.
 
 ## Guardrails
 
 - **Daily DM cap** (`outreach.daily_dm_limit`, default 20), counted across every run from
-  `data/contacted.csv`: `send.py` sends, **Mark sent** clicks, and held sends from today. Both the queue
+  `data/contacted.csv`: `send.py` sends, **Mark sent** clicks, follow-ups, and held sends from today. Both the queue
   server and `send.py` enforce it. New or low-activity accounts should start around 10.
-- **One DM per person, ever.** That includes held sends: their other posts aren't offered.
+- **One DM per person, ever.** That includes held sends: their other posts aren't offered. Plus at most one
+  follow-up (off by default), and only to people who never replied.
 - **Daily comment cap** (`outreach.daily_comment_limit`, default 10), separate from the DM cap. One comment per
   person, and only to people who won't get a DM.
 - **Minors** (`outreach.minor_policy`): if the AI thinks the author is under 18, the default

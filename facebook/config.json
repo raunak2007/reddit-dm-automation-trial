@@ -2,7 +2,7 @@
   "business": {
     "name": "Aristo Scholars",
     "website": "https://aristoscholars.com",
-    "booking_link": "https://aristoscholars.com/#get-started",
+    "booking_link": "https://aristoscholars.com/?utm_source=facebook&utm_medium=dm#get-started",
     "sender_first_name": "Ameer",
     "services": [
       "1:1 college admissions counseling (school list, strategy, timelines)",
@@ -63,7 +63,29 @@
     "replies_per_run": 30,
     "reply_min_delay_seconds": 20,
     "reply_max_delay_seconds": 60,
-    "queue_port": 8765
+    "queue_port": 8765,
+    "followup": {
+      "enabled": false,
+      "after_days": 6,
+      "max_per_run": 5,
+      "use_ai": true,
+      "max_chars": 500,
+      "template": "Hi {first_name}, following up on the message I sent you last week about your post. If you'd still like a hand, I'm happy to help, and you can book a free call here: {booking_link}. No worries at all if you've already sorted it out. {sender_first_name}"
+    }
+  },
+
+  "answers": {
+    "max_per_run": 10,
+    "min_delay_seconds": 60,
+    "max_delay_seconds": 180
+  },
+
+  "livecheck": {
+    "chat": "",
+    "name": "",
+    "post": "",
+    "post_author": "",
+    "post_text": ""
   },
 
   "browser": {

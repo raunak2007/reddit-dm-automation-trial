@@ -10,9 +10,12 @@ since nobody new can be in it. Comments switched off: skipped.
 
 How it finds them: inside the logged-in Chrome profile, with the session's own cookies, through the web API the
 Instagram page uses itself (comments.api): users/web_profile_info/?username=<u> for the account's id and its
-latest posts, then feed/user/<id>/ page by page until the posts are older than the lookback. If that doesn't
-answer, it opens the profile page and reads the grid's post links instead (no dates there). Nothing is liked,
-followed or opened beyond the profile and the posts themselves.
+latest posts, then feed/user/<id>/ page by page until the posts are older than the lookback, then the account's
+reels the same way from clips/user/ (a form POST of target_user_id, as Instagram web's Reels tab asks it; a GET
+with the same query if the POST doesn't answer), since a reel shared only to the Reels tab isn't in the feed.
+Reels already in the feed are kept once. Reels count toward the same lookback and discover.max_posts as posts.
+If the API doesn't answer, it opens the profile page and its Reels tab and reads the grids' links instead (no
+dates there). Nothing is liked, followed or opened beyond the profile and the posts themselves.
 
 data/posts.json remembers each post found: its link, owner, when it was posted and first seen, its comment count,
 when it was last read, how many times and how many commenters it had. A post is only read again while it is
@@ -30,7 +33,7 @@ import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import browser
 import comments
@@ -95,9 +98,52 @@ def profile_posts(user: dict) -> list[dict]:
     return out
 
 
-def from_api(driver, cfg: dict, username: str, cutoff: datetime) -> list[dict] | None:
-    """An account's posts back to `cutoff` (plus up to a page past it) from the web API, or None if it didn't
+def clips_posts(data: dict) -> list[dict]:
+    """The reels in one clips/user/ answer ({"items": [{"media": <a feed item>}], "paging_info": ...})."""
+    posts = feed_posts({"items": [it.get("media") or it for it in data.get("items") or []]})
+    for p in posts:
+        p["url"] = post_url(p["shortcode"], reel=True)
+    return posts
+
+
+def older_than(page: list[dict], cutoff: datetime) -> bool:
+    """True once a page's last unpinned post is from before cutoff: no need for the next page."""
+    unpinned = [p for p in page if not p["pinned"] and p["taken_at"]]
+    return bool(unpinned) and datetime.fromisoformat(unpinned[-1]["taken_at"]) < cutoff
+
+
+def from_clips(driver, cfg: dict, user_id: str, cutoff: datetime) -> list[dict]:
+    """The account's reels back to `cutoff` (plus up to a page past it) from clips/user/, or [] if it didn't
     answer. Raises AccountBlocked."""
+    posts, max_id, post = [], None, True
+    for _ in range(MAX_FEED_PAGES):
+        form = {"target_user_id": user_id, "page_size": 12, "include_feed_video": "true",
+                **({"max_id": max_id} if max_id else {})}
+        data = comments.api(driver, "clips/user/", form=form) if post else None
+        if data is None and not posts:                    # the POST didn't answer: ask with a GET from now on
+            post = False
+            data = comments.api(driver, f"clips/user/?{urlencode(form)}")
+        if not data:
+            break
+        page = clips_posts(data)
+        posts += page
+        paging = data.get("paging_info") or {}
+        max_id = paging.get("max_id")
+        if not paging.get("more_available") or not max_id or not page or older_than(page, cutoff):
+            break
+        browser.pause(cfg, 0.4)
+    return posts
+
+
+def merge(posts: list[dict], more: list[dict]) -> list[dict]:
+    """posts, then the ones in more that aren't among them already (by shortcode)."""
+    codes = {p["shortcode"] for p in posts}
+    return posts + [p for p in more if p["shortcode"] not in codes and not codes.add(p["shortcode"])]
+
+
+def from_api(driver, cfg: dict, username: str, cutoff: datetime) -> list[dict] | None:
+    """An account's posts and reels back to `cutoff` (plus up to a page past it) from the web API, or None if
+    it didn't answer. Raises AccountBlocked."""
     info = comments.api(driver, f"users/web_profile_info/?username={quote(username)}")
     user = ((info or {}).get("data") or {}).get("user")
     if not user or not user.get("id"):
@@ -110,24 +156,27 @@ def from_api(driver, cfg: dict, username: str, cutoff: datetime) -> list[dict] |
         page = feed_posts(data)
         posts += page
         max_id = data.get("next_max_id")
-        unpinned = [p for p in page if not p["pinned"] and p["taken_at"]]
-        if not data.get("more_available") or not max_id or not page or \
-                (unpinned and datetime.fromisoformat(unpinned[-1]["taken_at"]) < cutoff):
+        if not data.get("more_available") or not max_id or not page or older_than(page, cutoff):
             break
         browser.pause(cfg, 0.4)
+    posts = merge(posts or profile_posts(user), from_clips(driver, cfg, str(user["id"]), cutoff))
     for p in posts:
         p["owner"] = p["owner"] or user.get("username") or username
-    return posts or profile_posts(user)
+    return posts
 
 
 def from_page(driver, cfg: dict, username: str) -> list[dict]:
-    """The post links on the account's profile grid (no dates or comment counts). Raises AccountBlocked."""
-    driver.get(f"{direct.IG}/{username}/")
-    browser.pause(cfg, 0.6)
-    direct.check_account(driver)
-    return [{"shortcode": g["code"], "url": post_url(g["code"], g["kind"] == "reel"), "owner": username,
-             "taken_at": None, "comment_count": None, "comments_disabled": False, "pinned": False}
-            for g in driver.execute_script(_GRID)]
+    """The post links on the account's profile grid, then the reel links on its Reels tab (no dates or comment
+    counts), each once. Raises AccountBlocked."""
+    posts = []
+    for tab, reels in ((f"{username}/", False), (f"{username}/reels/", True)):
+        driver.get(f"{direct.IG}/{tab}")
+        browser.pause(cfg, 0.6)
+        direct.check_account(driver)
+        posts = merge(posts, [{"shortcode": g["code"], "url": post_url(g["code"], reels or g["kind"] == "reel"),
+                               "owner": username, "taken_at": None, "comment_count": None,
+                               "comments_disabled": False, "pinned": False} for g in driver.execute_script(_GRID)])
+    return posts
 
 
 def find(driver, cfg: dict, cutoff: datetime) -> list[dict]:

@@ -8,12 +8,15 @@
     python run.py send [--by-hand]   approve new leads and send (send.py); --by-hand: you press Send in each chat
     python run.py comment            post the drafted public comment on leads that won't get a DM (comment.py)
     python run.py replies            look in each DMed chat for a reply and list them in data/replies.csv (replies.py)
+    python run.py answer             send the answers you approved on the inbox page (answer.py, ../inbox)
+    python run.py followup           one follow-up DM to people who never replied (followup.py; outreach.followup.enabled)
+    python run.py livecheck          read-only checks on the real site (tests/test_live.py), for a weekly scheduler
     python run.py stats              counts from data/leads.json and data/contacted.csv
 
 Sending follows outreach.auto_approve (see send.py): with it on, every new lead at or above ai.min_score is sent
 its drafted DM. Set it to false to send only what you approve in the queue.
 
-Exit codes: 2 when a send or comment run halted on an account-wide problem or a streak of failures (so a scheduler
+Exit codes: 2 when a send, comment, replies, answer or follow-up run halted on an account-wide problem or a streak of failures (so a scheduler
 can tell you), 1 when a step stopped before starting (not logged in, wrong account, chat PIN, ...), else 0. In the
 full run, a send step that stops before starting doesn't keep the comment step from running; one that halts does.
 """
@@ -25,7 +28,10 @@ from collections import Counter
 from pathlib import Path
 
 import browser
+import answer
 import comment
+import followup
+import livecheck
 import qualify
 import queue_server
 import replies
@@ -57,6 +63,8 @@ def stats(cfg):
           f"| held {len(store.held())}")
     print(f"comments today {store.commented_today()}/{cfg['outreach'].get('daily_comment_limit', comment.DAILY_LIMIT)}"
           f" | held comments {len(store.held_comments())} | replies {len(store.replies())}")
+    fus = Counter(rows[-1]["status"] for rows in store.followups().values())
+    print(f"follow-ups ({'on' if followup.settings(cfg)['enabled'] else 'off'}):", dict(fus.most_common()))
 
 
 def step(fn, *args):
@@ -77,7 +85,8 @@ def step(fn, *args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="all", choices=["all", "login", "scrape", "qualify", "queue", "send", "comment",
-                                                          "replies", "stats"])
+                                                          "replies", "answer", "followup", "livecheck",
+                                                          "stats"])
     ap.add_argument("--limit-pages", type=int)
     ap.add_argument("--rescore", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
@@ -101,6 +110,12 @@ def main():
         raise SystemExit(comment.run(cfg))
     elif args.cmd == "replies":
         raise SystemExit(replies.run(cfg))
+    elif args.cmd == "answer":
+        raise SystemExit(answer.run(cfg))
+    elif args.cmd == "followup":
+        raise SystemExit(followup.run(cfg))
+    elif args.cmd == "livecheck":
+        raise SystemExit(livecheck.run(cfg))
     else:
         scrape.run(cfg, limit_pages=args.limit_pages)
         qualify.run(cfg, args.rescore)

@@ -3,7 +3,12 @@
     python run.py                        the daily run: find the recent posts (discover.py), read their comments ->
                                          pick leads and write DMs -> send them. Same as: python run.py auto
     python run.py <post or reel link>    the same for one post you name
-    python run.py replies                who wrote back after their DM (replies.py) -> data/replies.csv
+    python run.py replies                who wrote back after their DM, inbox and Message Requests (replies.py)
+                                         -> data/replies.csv
+    python run.py answer                 send the answers you approved in the shared inbox (answer.py)
+    python run.py followup               one follow-up to people who never replied (followup.py; off unless
+                                         outreach.followup.enabled)
+    python run.py livecheck              read-only checks against the real instagram.com (livecheck.py), weekly
     python run.py stats                  posts, leads, DMs sent, held and replied (no browser)
     python run.py posts                  the posts found so far and when each was read (no browser)
     python run.py login                  log in to Instagram once in the script's Chrome profile
@@ -36,6 +41,8 @@ import replies
 import send
 import store
 
+HELP = ("-h", "--help", "help")
+
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.json"
 
@@ -50,6 +57,8 @@ def stats(cfg: dict) -> None:
     print(f"leads     {len(leads)} commenters, {len(scored)} scored, {len(good)} at or above ai.min_score")
     print(f"sent      {len(sent)} ({store.sent_today()} today, cap {cfg['outreach']['daily_dm_limit']})")
     print(f"held      {len(store.held())}")
+    print(f"follow-up {sum(1 for rows in hist.values() if any(r['status'] == 'followup_sent' for r in rows))} sent"
+          f" (outreach.followup.enabled: {cfg['outreach'].get('followup', {}).get('enabled', False)})")
     print(f"replied   {len(replied)}" + (f" ({100 * len(replied) // len(sent)}% of sent)" if sent else "")
           + "  (as of the last python run.py replies)")
 
@@ -66,6 +75,9 @@ def auto(cfg: dict, url: str | None = None) -> int:
 
 def main():
     args = sys.argv[1:]
+    if any(a in HELP for a in args):                 # before anything opens Chrome or reads config.json
+        print(__doc__)
+        return 0
     if args == ["send", "--by-hand"]:
         return send.run(json.loads(CONFIG.read_text()), by_hand=True)
     if len(args) > 1:
@@ -77,6 +89,15 @@ def main():
         return auto(cfg, arg)
     if arg == "send":
         return send.run(cfg)
+    if arg == "answer":
+        import answer
+        return answer.run(cfg)
+    if arg == "followup":
+        import followup
+        return followup.run(cfg)
+    if arg == "livecheck":
+        import livecheck
+        return livecheck.run(cfg)
     if arg == "replies":
         replies.run(cfg)
     elif arg == "stats":

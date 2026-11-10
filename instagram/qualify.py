@@ -89,6 +89,13 @@ def plain(cfg: dict, lead: dict) -> dict:
             "scored_at": datetime.now().isoformat(timespec="seconds")}
 
 
+def client():
+    """The Anthropic client every draft here uses (ANTHROPIC_API_KEY from instagram/.env); followup.py too."""
+    load_dotenv(HERE / ".env")
+    import anthropic
+    return anthropic.Anthropic()
+
+
 def assess(client, cfg: dict, system: str, lead: dict) -> dict:
     resp = client.messages.create(
         model=cfg["ai"]["model"],
@@ -123,12 +130,12 @@ def run(cfg: dict, rescore=False, dry_run=False) -> int:
         return len(todo)
 
     import anthropic
-    client, system, hits = anthropic.Anthropic(), system_prompt(cfg), 0
+    claude, system, hits = client(), system_prompt(cfg), 0
     print(f"[+] Reading {len(todo)} comments with {cfg['ai']['model']}...")
     try:
         for i, lead in enumerate(todo, 1):
             try:
-                lead["ai"] = assess(client, cfg, system, lead)
+                lead["ai"] = assess(claude, cfg, system, lead)
             except anthropic.AuthenticationError:
                 sys.exit("ANTHROPIC_API_KEY is missing or invalid (set it in instagram/.env).")
             except anthropic.APIError as exc:

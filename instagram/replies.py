@@ -3,15 +3,17 @@
     python run.py replies        (or python replies.py)
 
 Reads the Direct inbox inside the logged-in Chrome profile through the web API the Instagram page itself uses
-(direct_v2/inbox/, page by page, with comments.api). That is a plain read: no chat is opened, so nothing is
-marked seen, and nothing is liked or sent. For everyone data/contacted.csv records as 'sent', it finds their
-one-to-one chat and keeps each message from them dated after our DM went out: who, when, a short snippet and the
-chat's link. Each one is added to data/replies.csv once (by Instagram's item id), so running it again only adds
-what's new. contacted.csv isn't changed.
+(direct_v2/inbox/, page by page, with comments.api), then, for anyone whose chat wasn't there, Message Requests
+(direct_v2/pending_inbox/, the same way). Those are plain reads: no chat is opened, no request is accepted, so
+nothing is marked seen, and nothing is liked or sent. For everyone data/contacted.csv records as 'sent', it finds
+their one-to-one chat and keeps each message from them dated after our DM went out: who, when, a short snippet,
+the whole message (up to 4000 characters) and the chat's link. Each one is added to data/replies.csv once (by
+Instagram's item id), so running it again only adds what's new; rows from Message Requests have how=request.
+contacted.csv isn't changed.
 
 Paging stops once every DMed person's chat has been seen, once the chats are older than the earliest DM, or after
-replies.max_pages pages (20 chats each, the latest replies.messages_per_chat messages of each). Chats in Message
-Requests or a creator account's General tab may not be in the inbox the API returns.
+replies.max_pages pages (20 chats each, the latest replies.messages_per_chat messages of each), in each of the two.
+A creator account's General tab may not be in what the API returns.
 
 If the inbox endpoint doesn't answer, it opens the inbox page instead and reads the chat list (no chat is opened
 there either): a chat whose name is the person's display name or username and whose preview isn't "You: ..." is
@@ -41,6 +43,7 @@ HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.json"
 DEFAULTS = {"max_pages": 10, "messages_per_chat": 20}
 SNIPPET = 120
+TEXT_MAX = 4000              # the whole message, capped, for data/replies.csv's text column
 LABELS = {"like": "like", "media": "photo or video", "raven_media": "disappearing photo or video",
           "voice_media": "voice message", "clip": "reel", "media_share": "shared post", "story_share": "shared story",
           "reel_share": "story reply", "animated_media": "GIF", "link": "link", "action_log": "reaction",
@@ -75,12 +78,19 @@ def when(ts) -> datetime | None:
     return datetime.fromtimestamp(n)
 
 
-def snippet(item: dict) -> str:
-    """A short plain-text version of one message."""
+def full_text(item: dict) -> str:
+    """The whole of one message as they wrote it (line breaks kept), up to TEXT_MAX characters; a label like
+    "[voice message]" for a message with no text."""
     kind = item.get("item_type") or ""
     text = item.get("text") or (item.get("link") or {}).get("text") or (item.get("reel_share") or {}).get("text") \
         or (item.get("action_log") or {}).get("description") or ""
-    text = " ".join(str(text).split()) or f"[{LABELS.get(kind, kind or 'message')}]"
+    text = str(text).strip() or f"[{LABELS.get(kind, kind or 'message')}]"
+    return text if len(text) <= TEXT_MAX else text[:TEXT_MAX - 3] + "..."
+
+
+def snippet(item: dict) -> str:
+    """A short plain-text version of one message."""
+    text = " ".join(full_text(item).split())
     return text if len(text) <= SNIPPET else text[:SNIPPET - 3] + "..."
 
 
@@ -88,10 +98,11 @@ def thread_url(thread: dict) -> str:
     return f"https://www.instagram.com/direct/t/{thread.get('thread_id')}/"
 
 
-def match(threads: list[dict], sent: dict[str, str], now: datetime | None = None) -> tuple[list[dict], set[str]]:
+def match(threads: list[dict], sent: dict[str, str], now: datetime | None = None,
+          how: str = "api") -> tuple[list[dict], set[str]]:
     """From inbox threads, the messages each DMed person sent after our DM. sent: {username: when our DM went
     out}. Returns (reply rows for data/replies.csv, usernames whose chat was among the threads). Group chats and
-    our own messages never count."""
+    our own messages never count. how: what the rows' how column says ('api', or 'request' for Message Requests)."""
     found_at = (now or datetime.now()).isoformat(timespec="seconds")
     rows, seen = [], set()
     for t in threads:
@@ -109,22 +120,23 @@ def match(threads: list[dict], sent: dict[str, str], now: datetime | None = None
             if not pk or str(item.get("user_id")) != pk or not at or at <= since or not item.get("item_id"):
                 continue
             rows.append({"username": user, "item_id": str(item["item_id"]), "replied_at": at.isoformat(timespec="seconds"),
-                         "snippet": snippet(item), "thread_url": thread_url(t), "sent_at": sent[user],
-                         "found_at": found_at, "how": "api"})
+                         "snippet": snippet(item), "text": full_text(item), "thread_url": thread_url(t),
+                         "sent_at": sent[user], "found_at": found_at, "how": how})
     rows.sort(key=lambda r: r["replied_at"])
     return rows, seen
 
 
-def via_api(driver, cfg: dict, sent: dict[str, str]) -> list[dict] | None:
-    """Every inbox thread that could hold a reply, page by page, or None if the inbox endpoint didn't answer.
-    Raises AccountBlocked."""
+def via_api(driver, cfg: dict, sent: dict[str, str], box: str = "inbox") -> list[dict] | None:
+    """Every thread in the inbox (box "inbox") or Message Requests (box "pending_inbox") that could hold a reply,
+    page by page, or None if that endpoint didn't answer. Only reads: nothing is accepted or marked seen. Raises
+    AccountBlocked."""
     r = settings(cfg)
     earliest, wanted = min(datetime.fromisoformat(t) for t in sent.values()), set(sent)
     threads, cursor = [], None
     for _ in range(r["max_pages"]):
         q = f"persistentBadging=true&limit=20&thread_message_limit={r['messages_per_chat']}" + \
             (f"&cursor={quote(cursor)}" if cursor else "")
-        data = comments.api(driver, f"direct_v2/inbox/?{q}")
+        data = comments.api(driver, f"direct_v2/{box}/?{q}")
         inbox = (data or {}).get("inbox")
         if inbox is None:
             return threads or None
@@ -168,10 +180,56 @@ def from_rows(rows: list[dict], sent: dict[str, str], names: dict[str, str], now
             continue
         at = max(now - ago(row["lines"][1:]), datetime.fromisoformat(since) + timedelta(seconds=1))
         out.append({"username": user, "item_id": "page:" + hashlib.sha1(f"{user}|{text}".encode()).hexdigest()[:16],
-                    "replied_at": at.isoformat(timespec="seconds"), "snippet": text[:SNIPPET],
+                    "replied_at": at.isoformat(timespec="seconds"), "snippet": text[:SNIPPET], "text": text[:TEXT_MAX],
                     "thread_url": row["href"] or direct.chat_link(user), "sent_at": since,
                     "found_at": now.isoformat(timespec="seconds"), "how": "page"})
     return out, seen
+
+
+def read_api(driver, cfg: dict, sent: dict[str, str], now: datetime) -> dict | None:
+    """The inbox, then Message Requests for whoever wasn't in it. None if the inbox endpoint didn't answer.
+    Returns {"rows", "seen", "threads": {username: (thread, 'api' | 'request')}, "how"}. Raises AccountBlocked."""
+    threads = via_api(driver, cfg, sent)
+    if threads is None:
+        return None
+    rows, seen = match(threads, sent, now)
+    found = {u: (t, "api") for t in threads for u in [one_to_one(t)] if u in seen}
+    missing = {u: at for u, at in sent.items() if u not in seen}
+    requests = via_api(driver, cfg, missing, "pending_inbox") if missing else []
+    how = f"{len(threads)} chats from Instagram's inbox endpoint"
+    if requests is None:
+        how += "; Message Requests didn't answer"
+    elif missing:
+        more, also = match(requests, missing, now, how="request")
+        rows, seen = sorted(rows + more, key=lambda r: r["replied_at"]), seen | also
+        found.update({u: (t, "request") for t in requests for u in [one_to_one(t)] if u in also})
+        how += f" and {len(requests)} from Message Requests"
+    return {"rows": rows, "seen": seen, "threads": found, "how": how}
+
+
+def one_to_one(thread: dict) -> str:
+    """The other person's username in a one-to-one chat, else ''."""
+    users = thread.get("users") or []
+    return "" if thread.get("is_group") or len(users) != 1 else (users[0].get("username") or "").lower()
+
+
+def thread(driver, cfg: dict, thread_id: str) -> dict | None:
+    """One chat's latest messages from the API (direct_v2/threads/<id>/), or None if it didn't answer. Reads only:
+    the chat isn't opened or marked seen. Raises AccountBlocked."""
+    data = comments.api(driver, f"direct_v2/threads/{quote(str(thread_id))}/?limit={settings(cfg)['messages_per_chat']}")
+    t = (data or {}).get("thread")
+    return t if isinstance(t, dict) and t.get("thread_id") else None
+
+
+def pending_users(driver, cfg: dict, people: list[str]) -> set[str] | None:
+    """Which of people have their chat in Message Requests right now, or None if that endpoint didn't answer.
+    Reads only: nothing is accepted. Raises AccountBlocked."""
+    if not people:
+        return set()
+    requests = via_api(driver, cfg, {p.lower(): "1970-01-01T00:00:00" for p in people}, "pending_inbox")
+    if requests is None:
+        return None
+    return {one_to_one(t) for t in requests} & {p.lower() for p in people}
 
 
 def via_page(driver, cfg: dict) -> list[dict]:
@@ -201,10 +259,9 @@ def run(cfg: dict) -> dict:
         driver = browser.make_driver(cfg)
         try:
             browser.ensure_logged_in(driver, cfg, interactive=sys.stdin.isatty())
-            threads = via_api(driver, cfg, sent)
-            if threads is not None:
-                rows, seen = match(threads, sent, now)
-                how = f"{len(threads)} chats from Instagram's inbox endpoint"
+            got = read_api(driver, cfg, sent, now)
+            if got is not None:
+                rows, seen, how = got["rows"], got["seen"], got["how"]
             else:
                 print("[!] The inbox endpoint didn't answer; reading the inbox page instead (latest message per chat, "
                       "times approximate)")
@@ -219,20 +276,22 @@ def run(cfg: dict) -> dict:
     fresh = store.add_replies(rows)
     replied = {r["username"] for r in store.load_replies()} & set(sent)
     for r in fresh:
-        print(f"  @{r['username']:<28} {r['replied_at'][:16]}  {r['snippet']!r}\n  {'':<29} {r['thread_url']}")
+        print(f"  @{r['username']:<28} {r['replied_at'][:16]}  {r['snippet']!r}\n  {'':<29} {r['thread_url']}"
+              + ("  (in Message Requests, not accepted)" if r.get("how") == "request" else ""))
     missing = len(set(sent) - seen)
     print(f"[done] read {how}; {len(replied)} of {len(sent)} people DMed have replied; {len(fresh)} new "
           f"{'message' if len(fresh) == 1 else 'messages'} saved to data/replies.csv")
     if missing:
-        print(f"[=] {missing} DMed people's chats weren't in what was read (older than the pages read, in Message "
-              f"Requests or General, or deleted)")
+        print(f"[=] {missing} DMed people's chats weren't in what was read (older than the pages read, in "
+              f"General, or deleted)")
     return {"dmed": len(sent), "replied": len(replied), "new": len(fresh), "missing": missing, "how": how}
 
 
 if __name__ == "__main__":
     import argparse
     argparse.ArgumentParser(description="Read the Direct inbox and record replies from people DMed into "
-                                        "data/replies.csv. Reads only; nothing is sent or marked seen.").parse_args()
+                                        "data/replies.csv (Message Requests too). Reads only; nothing is sent, "
+                                        "accepted or marked seen.").parse_args()
     try:
         run(json.loads(CONFIG.read_text()))
     except browser.Halt as stop:

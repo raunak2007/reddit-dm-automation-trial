@@ -1,7 +1,8 @@
 """test_replies.py - `python run.py replies` (replies.py) with fake inbox answers from Instagram's web API
 (helpers.FakeAPI) in place of instagram.com: reading the inbox page by page, matching chats to the people
-data/contacted.csv records as sent, counting only their messages after our DM, deduping by item id, the chat-list
-fallback, and the `replied` count in run.py stats.
+data/contacted.csv records as sent, counting only their messages after our DM, deduping by item id, the full text
+column (and reading files from before it), Message Requests (how=request, never accepted), the chat-list fallback,
+and the `replied` count in run.py stats.
 
     cd instagram && ../venv/bin/python -m unittest tests/test_replies.py
 """
@@ -82,6 +83,20 @@ class Matching(unittest.TestCase):
         long = replies.snippet({"text": "word " * 100})
         self.assertEqual(len(long), replies.SNIPPET)
         self.assertTrue(long.endswith("..."))
+
+    def test_full_text_keeps_the_whole_message_up_to_the_cap(self):
+        long = "line one\nline two " + "word " * 1200
+        t = thread("111", "jane.doe", 7, msg("i1", 7, 5, long))
+        [row] = replies.match([t], self.sent)[0]
+        self.assertTrue(row["text"].startswith("line one\nline two"), "line breaks kept")
+        self.assertEqual(len(row["text"]), replies.TEXT_MAX)
+        self.assertEqual(len(row["snippet"]), replies.SNIPPET)
+        self.assertEqual(replies.full_text({"item_type": "voice_media"}), "[voice message]")
+        self.assertEqual(replies.full_text({"text": "  ok!  "}), "ok!")
+
+    def test_rows_from_message_requests_say_so(self):
+        [row] = replies.match([thread("1", "jane.doe", 7, msg("r1", 7, 5))], self.sent, how="request")[0]
+        self.assertEqual(row["how"], "request")
 
     def test_timestamps_in_any_unit(self):
         for ts in (us(SENT), str(int(SENT.timestamp() * 1000)), int(SENT.timestamp())):
@@ -175,6 +190,69 @@ class Run(StoreTest):
             self.assertTrue(url.startswith("https://www.instagram.com/api/v1/direct_v2/inbox/?"), url)
             self.assertNotIn("seen", url)
         self.assertEqual(self.fake.visited, [], "no chat (or any page) was opened")
+
+    def pending(self, *pages):
+        def answer(url):
+            n = int(url.split("cursor=c")[1]) if "cursor=c" in url else 0
+            return {"inbox": {"threads": pages[n], "has_older": n + 1 < len(pages), "oldest_cursor": f"c{n + 1}"}}
+        self.fake.answers["direct_v2/pending_inbox/"] = answer
+
+    def test_message_requests_are_read_for_people_not_in_the_inbox(self):
+        self.inbox([thread("1", "jane.doe", 7, msg("j2", 7, 30, "hi from the inbox"))])
+        self.pending([thread("2", "sam.p", 8, msg("s2", 8, 40, "hi from requests\nsecond line"))])
+        got = replies.run(config())
+        self.assertEqual((got["replied"], got["new"], got["missing"]), (2, 2, 0))
+        rows = {r["username"]: r for r in store.load_replies()}
+        self.assertEqual(rows["jane.doe"]["how"], "api")
+        self.assertEqual((rows["sam.p"]["how"], rows["sam.p"]["text"]), ("request", "hi from requests\nsecond line"))
+        self.assertIn("Message Requests, not accepted", self.out.getvalue())
+        for url in self.fake.fetched:
+            self.assertRegex(url, r"^https://www\.instagram\.com/api/v1/direct_v2/(inbox|pending_inbox)/\?")
+            self.assertNotRegex(url, r"seen|approve|accept")
+        self.assertEqual(self.fake.posted, [], "nothing is POSTed: no request accepted, nothing marked seen")
+        self.assertEqual(self.fake.visited, [])
+
+    def test_message_requests_arent_read_when_everyone_is_in_the_inbox(self):
+        self.inbox([thread("1", "jane.doe", 7), thread("2", "sam.p", 8)])
+        self.pending([thread("3", "sam.p", 8, msg("s9", 8, 40))])
+        replies.run(config())
+        self.assertFalse([u for u in self.fake.fetched if "pending_inbox" in u])
+
+    def test_message_requests_not_answering_still_saves_the_inbox(self):
+        self.inbox([thread("1", "jane.doe", 7, msg("j2", 7, 30))])
+        got = replies.run(config())
+        self.assertEqual((got["new"], got["missing"]), (1, 1))
+        self.assertIn("Message Requests didn't answer", got["how"])
+
+    def test_a_challenge_from_message_requests_exits_2(self):
+        self.inbox([thread("1", "jane.doe", 7, msg("j2", 7, 30))])
+        self.fake.answers["direct_v2/pending_inbox/"] = (400, '{"message":"challenge_required"}')
+        with self.assertRaises(browser.Halt):
+            replies.run(config())
+
+    def test_pending_users_and_one_thread(self):
+        self.pending([thread("2", "sam.p", 8)])
+        self.assertEqual(replies.pending_users(self.fake, config(), ["Sam.P", "jane.doe"]), {"sam.p"})
+        self.fake.answers["direct_v2/pending_inbox/"] = (404, "{}")
+        self.assertIsNone(replies.pending_users(self.fake, config(), ["sam.p"]))
+        self.fake.answers["direct_v2/threads/77/"] = {"thread": thread("77", "jane.doe", 7, msg("x", 7, 1))}
+        self.assertEqual(replies.thread(self.fake, config(), "77")["thread_id"], "77")
+        self.assertIsNone(replies.thread(self.fake, config(), "78"))
+
+    def test_an_old_replies_file_without_text_is_read_and_upgraded(self):
+        with open(store.REPLIES, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["username", "item_id", "replied_at", "snippet", "thread_url", "sent_at", "found_at", "how"])
+            w.writerow(["jane.doe", "old1", "2026-11-08T11:00:00", "an old reply", "https://x/", "", "", "api"])
+        [old] = store.load_replies()
+        self.assertEqual((old["text"], old["thread_url"]), ("an old reply", "https://x/"), "text falls back to the snippet")
+        self.inbox([thread("2", "sam.p", 8, msg("s2", 8, 40, "new one"))], [thread("1", "jane.doe", 7)])
+        replies.run(config())
+        with open(store.REPLIES, newline="") as f:
+            self.assertEqual(next(csv.reader(f)), store.REPLY_FIELDS, "rewritten with the new header")
+        rows = {r["item_id"]: r for r in store.load_replies()}
+        self.assertEqual((rows["old1"]["snippet"], rows["old1"]["thread_url"]), ("an old reply", "https://x/"))
+        self.assertEqual(rows["s2"]["text"], "new one")
 
     def test_inbox_endpoint_silent_falls_back_to_the_chat_list(self):
         rows = [{"lines": ["jane.doe", "ok cool · 1h"], "href": ""}]

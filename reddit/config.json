@@ -2,7 +2,7 @@
   "business": {
     "name": "Aristo Scholars",
     "website": "https://aristoscholars.com",
-    "booking_link": "https://aristoscholars.com/#get-started",
+    "booking_link": "https://aristoscholars.com/?utm_source=reddit&utm_medium=dm#get-started",
     "sender_first_name": "Ameer",
     "services": [
       "1:1 college admissions counseling (school list, strategy, timelines)",
@@ -52,6 +52,20 @@
     "auto_approve": true,
     "minor_policy": "skip",
     "subject": "About your post"
+  },
+
+  "answers": {
+    "max_per_run": 10,
+    "subject": "re: About your post"
+  },
+
+  "followup": {
+    "enabled": false,
+    "after_days": 6,
+    "max_days": 30,
+    "max_per_run": 5,
+    "inbox_pages": 1,
+    "template": "Hi u/{username}, following up once on my message about your post in r/{subreddit}. If it would still help, {offer} is open, no pressure: {booking_link}\n- {sender_first_name}"
   },
 
   "browser": {

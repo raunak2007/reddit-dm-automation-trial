@@ -17,6 +17,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 import browser
 import direct
@@ -37,6 +38,19 @@ fetch(url, {credentials: 'include', headers: {'X-IG-App-ID': appId, 'X-CSRFToken
   .then(r => r.text().then(t => done({status: r.status, body: t})))
   .catch(e => done({status: 0, body: String(e)}));
 """
+# The same for the few read-only endpoints Instagram web asks with a form POST (READ_POSTS), e.g. clips/user/.
+_FETCH_FORM = r"""
+const [url, appId, form, done] = [arguments[0], arguments[1], arguments[2], arguments[arguments.length - 1]];
+const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
+fetch(url, {method: 'POST', body: form, credentials: 'include',
+            headers: {'X-IG-App-ID': appId, 'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest',
+                      'Content-Type': 'application/x-www-form-urlencoded'}})
+  .then(r => r.text().then(t => done({status: r.status, body: t})))
+  .catch(e => done({status: 0, body: String(e)}));
+"""
+# Endpoints that only read but that Instagram web asks with a POST. api() refuses a POST to anything else, so
+# nothing here can like, follow, accept or mark seen.
+READ_POSTS = ("clips/user/",)
 
 # Fallback: read the comments shown on the page. Each comment has a link to /<username>/ whose text is
 # the username, inside a block that also holds a <time>.
@@ -98,13 +112,20 @@ def owner(driver) -> str | None:
       return h ? h.getAttribute('href').replaceAll('/', '') : null;""")
 
 
-def api(driver, path: str) -> dict | None:
+def api(driver, path: str, form: dict | None = None) -> dict | None:
     """GET https://www.instagram.com/api/v1/<path> from inside the logged-in page (the page must be on
     instagram.com), with the session's own cookies. The parsed JSON, or None if the endpoint didn't answer
     usefully. Raises send_dm.AccountBlocked if Instagram is refusing the account (logged out, a challenge or
-    checkpoint, rate-limited or action-blocked), the same signal send.py stops on. Only ever reads: nothing
-    here is a POST, so nothing is liked, followed or marked seen."""
-    r = driver.execute_async_script(_FETCH, f"https://www.instagram.com/api/v1/{path}", APP_ID)
+    checkpoint, rate-limited or action-blocked), the same signal send.py stops on. Only ever reads: with
+    form, it POSTs that form instead, the way Instagram web asks a few read-only endpoints (READ_POSTS, e.g.
+    clips/user/); a POST anywhere else raises ValueError, so nothing is liked, followed or marked seen."""
+    url = f"https://www.instagram.com/api/v1/{path}"
+    if form is None:
+        r = driver.execute_async_script(_FETCH, url, APP_ID)
+    else:
+        if not any(path.startswith(p) for p in READ_POSTS):
+            raise ValueError(f"comments.api only POSTs to read-only endpoints ({', '.join(READ_POSTS)}), not {path}")
+        r = driver.execute_async_script(_FETCH_FORM, url, APP_ID, urlencode(form))
     status, head = r["status"], r["body"][:600].lower()
     if status in (401, 403) or (status != 200 and "login" in head[:300]) or '"require_login":true' in head:
         raise AccountBlocked("Instagram says this profile isn't logged in (run: python run.py login)", "login")
@@ -235,10 +256,13 @@ def run(cfg: dict, url: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: python comments.py <instagram post or reel link>")
+    import argparse
+    ap = argparse.ArgumentParser(description="Read everyone who commented on one post or reel into data/leads.json. "
+                                             "Reads only; nothing is followed, liked or sent.")
+    ap.add_argument("url", help="the post or reel link")
+    args = ap.parse_args()                         # before Chrome opens, so --help only prints help
     try:
-        run(json.loads(CONFIG.read_text()), sys.argv[1])
+        run(json.loads(CONFIG.read_text()), args.url)
     except browser.Halt as stop:
         print(f"[stopped] {stop}")
         sys.exit(2)
