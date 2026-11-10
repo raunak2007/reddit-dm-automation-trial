@@ -159,7 +159,8 @@ def follow_first(driver, user, cfg):
 
 
 def new_counts():
-    counts = {s: 0 for s in ("sent", "recipient", "refused", "invalid", "not_submitted", "uncertain", "skipped")}
+    counts = {s: 0 for s in ("sent", "recipient", "refused", "invalid", "not_submitted", "uncertain", "skipped",
+                             "expired")}
     counts.update(stopped="", halted=False)
     return counts
 
@@ -297,7 +298,9 @@ def report(counts):
     """Print a run summary; returns the exit code (2 if the run halted on an account or streak problem)."""
     print(f"\n[done] sent {counts['sent']}, uncertain {counts['uncertain']}, refused {counts['refused']}, "
           f"no such account {counts['recipient']}, failed before sending {counts['not_submitted']}, "
-          f"bad entries {counts['invalid']}, skipped {counts['skipped']}; {store.sent_today()} sent today in total")
+          f"bad entries {counts['invalid']}, skipped {counts['skipped']}"
+          + (f", expired {counts['expired']}" if counts.get("expired") else "")
+          + f"; {store.sent_today()} sent today in total")
     if counts["stopped"]:
         print(f"[stopped] {counts['stopped']}")
     waiting = store.held()
@@ -316,6 +319,9 @@ def print_list(leads, cfg):
 
 
 def run(cfg, by_hand=False):
+    import apimode
+    if apimode.is_api(cfg):                        # config.json "mode": "api": private replies through the API
+        return apimode.send_run(cfg, by_hand)
     out = cfg["outreach"]
     if out.get("auto_approve", True):
         n = queue_server.auto_approve()

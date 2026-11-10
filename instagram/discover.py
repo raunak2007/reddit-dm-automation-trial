@@ -258,6 +258,9 @@ def mark_read(state: dict, p: dict, got: dict, now: datetime) -> None:
 def run(cfg: dict, dry_run: bool = False) -> dict:
     """Find the recent posts and read each one's commenters into data/leads.json (comments.read_post). Raises
     browser.Halt (exit code 2) if Instagram refuses the account. Returns {"read", "skipped", "new", "failed"}."""
+    import apimode
+    if apimode.is_api(cfg):                        # config.json "mode": "api": the account's media via the API
+        return apimode.discover(cfg, dry_run)
     now = datetime.now()
     cutoff = now - timedelta(days=settings(cfg)["lookback_days"])
     totals = {"read": 0, "skipped": 0, "new": 0, "failed": 0}

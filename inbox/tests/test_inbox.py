@@ -133,6 +133,23 @@ class ReadingTest(Base):
         write_csv(self.paths["instagram"]["replies"], IG_FIELDS + ["text"], [dict(row, text="hi! tell me more")])
         self.assertEqual(draft.read_replies("instagram")[0]["text"], "hi! tell me more")
 
+    def test_instagram_api_mode_reply_by_reaches_the_entry_and_the_page(self):
+        row = {"username": "jamie.k", "item_id": "m1", "replied_at": "2026-11-04T08:00:00", "snippet": "how much?",
+               "reply_by": "2026-11-05T08:00:00"}
+        write_csv(self.paths["instagram"]["replies"], IG_FIELDS + ["text", "reply_by"], [row])
+        self.assertEqual(draft.read_replies("instagram")[0]["extra"], {"reply_by": "2026-11-05T08:00:00"})
+        [e] = self.run_draft(FakeClient())
+        self.assertEqual(e["reply_by"], "2026-11-05T08:00:00")
+        page = (Path(draft.__file__).parent / "page.html").read_text()
+        self.assertIn("answer by ", page)
+        self.assertIn("left < 3", page, "red under 3 hours left")
+
+    def test_instagram_browser_rows_carry_no_deadline(self):
+        write_csv(self.paths["instagram"]["replies"], IG_FIELDS,
+                  [{"username": "jamie.k", "item_id": "i1", "replied_at": "2026-11-04T08:00:00", "snippet": "hi"}])
+        [e] = self.run_draft(FakeClient())
+        self.assertNotIn("reply_by", e)
+
     def test_missing_files_are_empty(self):
         self.assertEqual(draft.pending(), [])
 

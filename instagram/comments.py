@@ -245,6 +245,9 @@ def run(cfg: dict, url: str) -> int:
     """Read one post in its own browser session. Exits with code 2 (browser.Halt) if Instagram refuses the
     account. Returns how many new commenters it found."""
     shortcode(url)                                     # a bad link stops before Chrome opens
+    import apimode
+    if apimode.is_api(cfg):
+        return apimode.read_link(cfg, url)
     driver = browser.make_driver(cfg)
     try:
         browser.ensure_logged_in(driver, cfg, interactive=sys.stdin.isatty())

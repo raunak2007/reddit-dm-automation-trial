@@ -121,6 +121,9 @@ def send_one(driver, entry: dict, cfg: dict, send_fn) -> tuple[str, Result | Non
 def run(cfg: dict, send_fn=None) -> int:
     """Send the approved Instagram answers. Returns the exit code (2: stopped on an account-wide problem or a
     streak)."""
+    import apimode
+    if apimode.is_api(cfg):                        # config.json "mode": "api": a DM to their IGSID, 24h window
+        return apimode.answer_run(cfg)
     a, out = settings(cfg), cfg["outreach"]
     send_fn = send_fn or (lambda *args, **kw: direct.send_message(*args, verify=out.get("verify_after_send", False),
                                                                   **kw))

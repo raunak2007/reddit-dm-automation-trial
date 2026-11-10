@@ -35,6 +35,8 @@ main { max-width: 860px; margin: 0 auto; padding: 16px; display: grid; gap: 14px
 .chip { background: var(--chip); border-radius: 4px; padding: 1px 7px; font-size: 12px; }
 .chip.dismiss { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
 .chip.auto { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.chip.by { font-weight: 600; }
+.chip.by.late { background: var(--bad); color: var(--card); }
 .right { margin-left: auto; }
 blockquote { margin: 4px 0 8px; padding: 8px 12px; background: var(--quote); border-radius: 6px; white-space: pre-wrap; max-height: 12em; overflow: auto; font-size: 14px; overflow-wrap: anywhere; }
 blockquote.ours { max-height: 6.5em; color: var(--muted); }
@@ -82,6 +84,13 @@ function when(iso) {
   const days = (Date.now() - d) / 864e5;
   return days < 1 ? `today ${d.toTimeString().slice(0, 5)}` : days < 2 ? "yesterday" : `${Math.floor(days)} days ago`;
 }
+// Instagram API mode: Meta only allows an answer within 24 hours of their latest message. Red under 3 hours left.
+function deadline(iso) {
+  const d = new Date(iso); if (isNaN(d)) return "";
+  const left = (d - Date.now()) / 36e5;
+  const at = d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  return `<span class="chip by ${left < 3 ? "late" : ""}" title="Instagram allows an answer only within 24 hours of their latest message">${left <= 0 ? "window closed " : "answer by "}${esc(at)}</span>`;
+}
 async function api(path, body) {
   const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
   const j = await r.json().catch(() => ({}));
@@ -103,6 +112,7 @@ function card(a) {
       <span class="who">${esc(a.name || a.person)}</span>
       ${a.name && a.name !== a.person ? `<span class="sub">${esc(a.person)}</span>` : ""}
       <span class="sub">${esc(when(a.received_at || a.created_at))}${(a.covers || []).length > 1 ? ` · ${a.covers.length} messages` : ""}${a.kind && a.kind !== "message" ? ` · ${esc(a.kind.replace(/_/g, " "))}` : ""}</span>
+      ${a.reply_by && editable ? deadline(a.reply_by) : ""}
       ${a.approved_by === "auto" ? `<span class="chip auto right" title="Approved automatically (auto_approve in inbox/config.json)">auto-approved</span>` : ""}
       ${dismissHint && editable ? `<span class="chip dismiss right" title="${esc(a.note)}">suggest: dismiss</span>` : ""}
     </div>

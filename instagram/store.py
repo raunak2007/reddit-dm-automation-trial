@@ -22,6 +22,7 @@ data/contacted.csv   one row per event: username, lead_key, status, timestamp, n
                          login / rate_limited / restricted   account-wide: the run stopped there
                          cleared        a held send checked and found not to have gone out (send.py does this
                                         at the start of each run, or `send.py resolve ... --not-sent`)
+                         expired        API mode: the comment's 7-day private-reply window closed: never retried
                      from followup.py (one follow-up, ever, to someone who got our DM and never replied; these
                      rows' lead_key is "followup:<username>", so the review page's view of the lead is unchanged,
                      and the first DM's held / sent logic below ignores them):
@@ -35,7 +36,8 @@ data/posts.json      {"<shortcode>": {"url", "owner", "taken_at", "comment_count
 data/replies.csv     one row per message someone sent back after our DM (replies.py): username, item_id,
                      replied_at, snippet, text (the whole message, up to 4000 characters), thread_url, sent_at,
                      found_at, how ('api' = the inbox, 'request' = Message Requests, 'page' = the inbox page's
-                     chat list). One row per item_id. Files from before `text` existed are still read (their
+                     chat list, 'graph' = API mode's conversations), and in API mode thread_id (the conversation),
+                     user_id (their IGSID) and reply_by (their latest message + 24 hours: the messaging window). One row per item_id. Files from before `text` existed are still read (their
                      text is the snippet) and get the column the next time a reply is added.
 
 From that history, as ledger.py does for Reddit:
@@ -64,15 +66,17 @@ CONTACTED = DATA / "contacted.csv"
 LOCK = DATA / "send.lock"
 POSTS = DATA / "posts.json"
 REPLIES = DATA / "replies.csv"
-REPLY_FIELDS = ["username", "item_id", "replied_at", "snippet", "text", "thread_url", "sent_at", "found_at", "how"]
+REPLY_FIELDS = ["username", "item_id", "replied_at", "snippet", "text", "thread_url", "sent_at", "found_at", "how",
+                "reply_by", "thread_id", "user_id"]
 FIELDS = ["username", "lead_key", "status", "timestamp", "note"]
 QUEUE_STATUSES = ("approved", "unapproved", "sent", "skipped", "not_relevant")
 SEND_STATUSES = ("submitting", "uncertain", "refused", "recipient", "not_submitted", "cleared",
-                 "login", "rate_limited", "restricted")
+                 "login", "rate_limited", "restricted", "expired")
 FOLLOWUP_STATUSES = ("followup_submitting", "followup_sent", "followup_uncertain", "followup_failed")
 FOLLOWUP_DONE = ("followup_submitting", "followup_sent", "followup_uncertain")   # it went, or may have: never again
 STATUSES = QUEUE_STATUSES + SEND_STATUSES + FOLLOWUP_STATUSES
-FINAL = {"sent": "already sent", "recipient": "Instagram says there is no such account"}
+FINAL = {"sent": "already sent", "recipient": "Instagram says there is no such account",
+         "expired": "their comment's 7-day private-reply window closed (API mode)"}
 HELD = ("uncertain", "submitting")       # the last row being one of these holds the person
 ATTEMPTS = ("not_submitted", "refused", "uncertain")
 # A lead whose last row is one of these is approved and hasn't gone out yet: send.py picks it up.

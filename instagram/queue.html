@@ -59,14 +59,15 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 <div id="toast" role="status"></div>
 <script>
 const TABS = [["todo", "To send"], ["approved", "Approved"], ["done", "Done"], ["low", "Not leads"], ["all", "All"]];
-const DONE = new Set(["sent", "skipped", "not_relevant", "already_contacted", "recipient"]);
+const DONE = new Set(["sent", "skipped", "not_relevant", "already_contacted", "recipient", "expired"]);
 const SENDING = new Set(["approved", "held", "gave_up"]);
 const LABEL = { sent: "DMed", skipped: "Skipped", not_relevant: "Marked not relevant",
                 already_contacted: "Already DMed from another post", low: "Below the score cutoff",
                 approved: "Approved: python run.py send will send this DM", unapproved: "Back in To send",
                 held: "HELD: a send may have gone out. The next send run checks the chat and settles it",
                 gave_up: "Not sent: gave up after repeated failed attempts",
-                recipient: "Instagram says there is no such account" };
+                recipient: "Instagram says there is no such account",
+                expired: "Not sent: the comment's 7-day private-reply window closed (API mode)" };
 let data = { leads: [] }, tab = "todo";
 try { tab = localStorage.getItem("ig-tab") || "todo"; } catch (e) {}
 

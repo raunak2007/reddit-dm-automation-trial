@@ -186,6 +186,10 @@ def status_for(result: Result, pressed: bool) -> str:
 
 def run(cfg: dict, send_fn=None, draft_fn=None) -> int:
     """Send this run's follow-ups. Returns the exit code (2: stopped on an account-wide problem or a streak)."""
+    import apimode
+    if apimode.is_api(cfg):
+        print(f"[=] {apimode.FOLLOWUP_REFUSAL}")
+        return 0
     f, out = settings(cfg), cfg["outreach"]
     if not f["enabled"]:
         print("[+] Follow-ups are off (outreach.followup.enabled is false).")

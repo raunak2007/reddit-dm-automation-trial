@@ -1,4 +1,12 @@
 {
+  "mode": "browser",
+
+  "api": {
+    "graph_version": "v23.0",
+    "ig_user_id": "",
+    "max_media_pages": 4
+  },
+
   "business": {
     "name": "Aristo Scholars",
     "website": "https://aristoscholars.com",

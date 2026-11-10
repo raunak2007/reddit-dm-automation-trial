@@ -70,6 +70,9 @@ def command() -> list[str]:
 
 
 def run(cfg: dict) -> int:
+    import apimode
+    if apimode.is_api(cfg):                        # config.json "mode": "api": API reads only, no browser
+        return apimode.livecheck(cfg)
     lc = settings(cfg)
     with store.lock():
         print(f"[+] live checks (read-only) with profile {cfg['browser']['profile']!r}"

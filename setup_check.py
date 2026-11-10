@@ -246,6 +246,8 @@ def platform_checks(c, platform):
         c.todo(s, f"{platform}/config.json doesn't parse: {cfg['__error__']}")
         return
     out, live = cfg.get("outreach", {}), cfg.get("livecheck", {})
+    if platform == "instagram" and cfg.get("mode", "browser") == "api":
+        return instagram_api(c, cfg)
     profile(c, s, platform, cfg, f"cd {platform} && python run.py login")
     if str(out.get("sender_user_id") or "").strip():
         c.ok(s, f"sends as user id {out['sender_user_id']}")
@@ -290,6 +292,29 @@ def platform_checks(c, platform):
         gated(c, s, "follow-ups", platform, "outreach.followup.enabled")
     else:
         c.note(s, "follow-ups are off (outreach.followup.enabled); turn on after a live check passes")
+
+
+def instagram_api(c, cfg):
+    """Instagram in API mode (config "mode": "api"): the official API instead of a browser."""
+    s, out = "instagram", cfg.get("outreach", {})
+    c.ok(s, "API mode: comments, first DMs, answers and replies go through Meta's official API (no browser)")
+    stored = HERE / "instagram" / "data" / "api_token.json"
+    if env_has("IG_ACCESS_TOKEN", HERE / "instagram" / ".env") or stored.exists():
+        c.ok(s, "Instagram access token set" + (" (refreshed automatically)" if stored.exists() else ""))
+    else:
+        c.todo(s, "put IG_ACCESS_TOKEN=... in instagram/.env: a long-lived token from your Meta app (instagram/README.md, "
+                  "API mode). The account must be Business or Creator: a personal account can't use the API")
+    ig = cfg.get("instagram", {})
+    (c.ok if ig.get("my_username") else c.todo)(
+        s, f"API account @{ig['my_username']} (must be the professional account the token belongs to)"
+        if ig.get("my_username") else "set instagram.my_username to the professional account's handle")
+    if str(out.get("sender_user_id") or "").strip() == "" and not cfg.get("api", {}).get("ig_user_id"):
+        c.note(s, "the account id is read from the token (/me); the live check confirms it's the right, professional account")
+    key(c, s, HERE / "instagram")
+    business(c, s, cfg)
+    live_status(c, s, "instagram", True)
+    c.note(s, "API mode limits: first DMs only within 7 days of the comment, one per comment; answers only within 24h "
+              "of their last message (the inbox shows 'answer by'); no follow-ups")
 
 
 def inbox(c):

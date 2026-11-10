@@ -22,6 +22,9 @@ its drafted DM. Set it to false to send only what you approve on the review page
 send.py follows each person right before their DM, and outreach.auto_resolve rechecks held sends on each run.
 Which posts a run reads: discover.* in config.json (see discover.py).
 
+config.json "mode": "api" (a professional account only) does all of this through Meta's Instagram API instead of
+the browser: see apimode.py and README's API mode.
+
 Exit codes: 0 done, 2 stopped on an account-wide problem (logged out, a security check, an action block or rate
 limit, a locked account, or a streak of failed sends), 1 anything else (a bad link, a missing setting, ...). A
 scheduler can alert on 2.
@@ -104,6 +107,9 @@ def main():
         stats(cfg)
     elif arg == "posts":
         discover.print_posts(cfg)
+    elif arg == "login" and cfg.get("mode") == "api":
+        print("API mode doesn't use the browser: put the long-lived token in instagram/.env as IG_ACCESS_TOKEN "
+              "(README, API mode), then: python run.py livecheck")
     elif arg == "login":
         driver = browser.make_driver(cfg)
         try:

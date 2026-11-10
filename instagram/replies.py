@@ -253,6 +253,9 @@ def via_page(driver, cfg: dict) -> list[dict]:
 def run(cfg: dict) -> dict:
     """Check the inbox for replies from everyone DMed and add new ones to data/replies.csv. Raises browser.Halt
     (exit code 2) if Instagram refuses the account. Returns {"dmed", "replied", "new", "missing", "how"}."""
+    import apimode
+    if apimode.is_api(cfg):                        # config.json "mode": "api": conversations via the API
+        return apimode.replies_run(cfg)
     sent, now = store.sent_at(), datetime.now()
     if not sent:
         print("[+] Nobody is recorded as sent in data/contacted.csv yet; no replies to look for.")

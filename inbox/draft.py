@@ -5,7 +5,8 @@
 Reads the three reply watchers' files (read only; nothing in the platform folders is changed):
     reddit/data/replies.csv     message_id, username, kind, received_at, subject, snippet, permalink, recorded_at
     facebook/data/replies.csv   author_key, author, post_key, seen_at, snippet, chat_url
-    instagram/data/replies.csv  username, item_id, replied_at, snippet, thread_url, sent_at, found_at, how
+    instagram/data/replies.csv  username, item_id, replied_at, snippet, text, thread_url, sent_at, found_at, how,
+                                reply_by (API mode: their latest message + 24h, the messaging window)
 each optionally with a `text` column (the full message; `snippet` is used when it's missing or empty).
 
 Every reply with no entry in inbox/data/answers.json yet is drafted once:
@@ -134,7 +135,7 @@ def read_replies(platform: str) -> list[dict]:
             rid, person, name = r.get("item_id"), r.get("username"), r.get("username")
             at = r.get("replied_at") or r.get("found_at") or ""
             url = r.get("thread_url") or (f"https://ig.me/m/{person}" if person else "")
-            extra = {}
+            extra = {"reply_by": r.get("reply_by") or ""}     # API mode: answer by then (Meta's 24-hour window)
         if not rid or not person:
             continue
         out.append({"platform": platform, "reply_id": str(rid), "person": person, "name": name or person,

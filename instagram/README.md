@@ -261,6 +261,65 @@ failed is retried on later runs, up to `outreach.max_attempts_per_recipient` (3)
 runs at a time. Don't read comments while it runs: they share the Chrome profile (`python run.py`
 and `run.py replies` refuse to start while `send.py` runs).
 
+## API mode (a professional account, optional)
+
+Everything above is **browser mode**, the default (`"mode": "browser"` in config.json), and it's unchanged. It's
+what a personal account like @ameer.husss uses. **API mode** (`"mode": "api"`) uses Meta's official Instagram API
+(Instagram API with Instagram Login, graph.instagram.com) instead of Chrome, and only works for a
+**professional (Business or Creator) account**. Every command refuses (exit code 2) if `/me` says the account
+isn't professional, or isn't `instagram.my_username`.
+
+### Setting it up
+
+1. **Make the account professional:** in the Instagram app, Settings → Account type and tools → Switch to a
+   professional account (Business or Creator).
+2. **Create a Meta app:** at developers.facebook.com, Create app → use case "Manage messaging & content on
+   Instagram" (the *Instagram API with Instagram Login* product). Under Instagram → API setup with Instagram
+   login, add the permissions `instagram_business_basic`, `instagram_business_manage_comments` and
+   `instagram_business_manage_messages`.
+3. **Add the account as an Instagram Tester:** App roles → Roles → Add people → Instagram Tester, then accept
+   the invite in Instagram (Settings → Website permissions → Apps and websites → Tester invites).
+4. **Set the app Live.** App Review isn't needed while it only uses your own accounts (the ones with a role on
+   the app).
+5. **Get a long-lived token:** in API setup with Instagram login, "Generate token" for the account (it's
+   long-lived, about 60 days), or exchange a short-lived one with
+   `GET https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=...&access_token=...`.
+   Put it in `instagram/.env` as `IG_ACCESS_TOKEN=...`.
+6. In config.json set `"mode": "api"` and `instagram.my_username` to that account's handle, then run
+   `python run.py livecheck`.
+
+The token is refreshed automatically once it's 30 days old
+(`graph.instagram.com/refresh_access_token`). The new token and its dates go in `data/api_token.json`, which is
+gitignored and readable only by you, and the token is never printed. Every run warns when it has under 14 days
+left. A new token pasted into `.env` replaces the stored one.
+
+### What each command does in API mode
+
+| Command | API mode |
+|---|---|
+| `python run.py` | Discover: the account's own posts and reels (`/me/media`) within `discover.lookback_days`, capped at 7 (it says so when it lowers it). Their comments (`/{media}/comments`) go into the same `leads.json` shape, with `comment_id` (the commenter's newest comment) and `user_id`. Qualify: unchanged. Send: see below. `discover.accounts` / `discover.posts` aren't read. |
+| `python run.py send` | A **private reply** to the lead's comment (`POST /{ig-user-id}/messages {"recipient": {"comment_id": ...}}`). `send.py`'s own loop: a `submitting` row first, the daily cap, the delays, the streak stops. Nobody is followed. Instagram's "already sent" counts as `sent`. A closed 7-day window is `expired` (final, never retried). A rate limit or a dead token stops the run with exit code 2. No answer or a 5xx is `uncertain` and held. |
+| `python run.py replies` | `/me/conversations`: their messages after our reply go into `replies.csv` with `text`, `item_id` = the message id, `thread_id` = the conversation id, `user_id` = their IGSID, `how=graph`, and `reply_by`: their latest message + 24 hours. |
+| `python run.py answer` | Approved inbox answers, sent as a DM to their IGSID (`{"recipient": {"id": ...}}`), **only inside the 24-hour window**. Outside it, the entry is marked `failed`: "the 24-hour window closed on <time>". The same `sending` / `sent` / `failed` / `uncertain` rules as browser mode. The inbox page shows "answer by <time>", in red under 3 hours. |
+| `python run.py followup` | Refused (exit 0): Meta allows no message to someone who hasn't written back. |
+| `python run.py livecheck` | No browser. It checks that the token works, that `/me` is a professional account matching `instagram.my_username`, and that one media, comments and conversations read each work. Exit `0` passed, `2` bad token, missing permission, or the wrong / a non-professional account, `1` anything else. |
+
+### Limits
+
+- **7 days:** a private reply is only possible within 7 days of the comment.
+- **One reply per comment.** One DM per person, as in browser mode.
+- **The 24-hour window:** after they write, you can answer for 24 hours from their latest message.
+- **No follow-ups:** nothing can go to someone who hasn't replied.
+- **About 750 private replies per hour** per account (keep `daily_dm_limit` far below that anyway).
+
+| Key | Default | What it does |
+|---|---|---|
+| `mode` | `"browser"` | `"api"` for API mode. |
+| `api.graph_version` | `"v23.0"` | The Graph API version. |
+| `api.ig_user_id` | `""` | Optional: the account's id. `/me` gives it; if set, it must match. |
+| `api.max_media_pages` | 4 | Pages of `/me/media` (25 each) to read at most. |
+| `IG_ACCESS_TOKEN` (in `.env`) | | The long-lived token. |
+
 ## Tests
 
 ```bash
@@ -285,6 +344,10 @@ IG_LIVE=1 IG_LIVE_PROFILE=<username> ../venv/bin/python -m unittest tests/test_l
   answer through the real page code.
 - `tests/test_followup.py`: who is due a follow-up, the re-check right before each send, drafting and the
   template, the daily cap counting follow-ups (in `send.py` too), one ever, and stops.
+- `tests/test_apimode.py`: API mode against a fake Graph API (no network): the token (refresh, warnings, never
+  printed), the professional check, discover and comments, private replies (already sent, the 7-day window, rate
+  limits with exit 2, the cap), replies with `reply_by`, answers in the 24-hour window, follow-ups refused,
+  livecheck, and browser mode untouched.
 - `tests/test_livecheck.py`: the environment `livecheck` gives `test_live.py`, its exit codes, and that every
   script's `--help` only prints help.
 - `tests/test_mock_site.py`: `direct.py`'s real page code in headless Chrome against mock profiles and chats.
@@ -317,6 +380,7 @@ IG_LIVE=1 IG_LIVE_PROFILE=<username> ../venv/bin/python -m unittest tests/test_l
 | `replies.py` | Reads the inbox and Message Requests (web API, else the chat list) for replies to our DMs, into `data/replies.csv`. |
 | `answer.py` | `run.py answer`: sends the answers approved in the shared inbox (`../inbox/store.py`). |
 | `followup.py`, `prompts/followup.md` | `run.py followup`: one follow-up to people who never replied. |
+| `graph.py`, `apimode.py` | API mode: the Graph API client and token, and each command's API version. |
 | `livecheck.py` | `run.py livecheck`: the read-only live checks, with an exit code for a scheduler. |
 | `qualify.py` | Scores each comment with Claude and writes the DM. |
 | `queue_server.py`, `queue.html` | The review page. |
