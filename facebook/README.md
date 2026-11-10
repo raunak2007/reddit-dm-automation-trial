@@ -194,12 +194,13 @@ on anything account-wide (logged out, checkpoint, block, chat PIN), or after 5 c
 is the first 160. A `replies.csv` from before the `text` column still reads (its rows get `text` = `snippet`) and is
 rewritten with the column the next time a reply is added.
 
-After you answer someone from the inbox (status `sent`), later runs open their chat again and add **one row per new
-message** from them after our latest message in the chat (the DM, a follow-up, an answer or anything sent by hand).
-Our own messages never count, a message already recorded since our latest answer isn't recorded again, and each row's
-`seen_at` is unique for that person, since the inbox keys Facebook replies on `author_key:seen_at`. Within
-`replies_per_run`, people whose last reply is older than our latest answer to them go first, then chats never
-checked, then everyone else we've answered.
+Everyone in `replies.csv` is checked again on later runs, before and after you answer them (not when their latest inbox
+entry is dismissed, or an answer is sending / uncertain), and gets **one row per new message** from them after our
+latest message in the chat (the DM, a follow-up, an answer or anything sent by hand). Our own messages never count, a
+message already recorded isn't recorded again, and each row's `seen_at` is unique for that person, since the inbox
+keys Facebook replies on `author_key:seen_at`. A new row while a draft is waiting makes the next `inbox/run.py draft`
+redraft with the whole conversation (it replaces an untouched draft). Within `replies_per_run`: people with no answer
+sent yet (draft waiting, or none) first, then people we've answered, then DMed chats never checked.
 
 ## Answers (answer.py)
 

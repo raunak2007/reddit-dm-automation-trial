@@ -34,6 +34,7 @@ main { max-width: 860px; margin: 0 auto; padding: 16px; display: grid; gap: 14px
 .sub { color: var(--muted); font-size: 13px; }
 .chip { background: var(--chip); border-radius: 4px; padding: 1px 7px; font-size: 12px; }
 .chip.dismiss { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
+.chip.auto { background: var(--accent); color: var(--accent-text); font-weight: 600; }
 .right { margin-left: auto; }
 blockquote { margin: 4px 0 8px; padding: 8px 12px; background: var(--quote); border-radius: 6px; white-space: pre-wrap; max-height: 12em; overflow: auto; font-size: 14px; overflow-wrap: anywhere; }
 blockquote.ours { max-height: 6.5em; color: var(--muted); }
@@ -102,6 +103,7 @@ function card(a) {
       <span class="who">${esc(a.name || a.person)}</span>
       ${a.name && a.name !== a.person ? `<span class="sub">${esc(a.person)}</span>` : ""}
       <span class="sub">${esc(when(a.received_at || a.created_at))}${(a.covers || []).length > 1 ? ` · ${a.covers.length} messages` : ""}${a.kind && a.kind !== "message" ? ` · ${esc(a.kind.replace(/_/g, " "))}` : ""}</span>
+      ${a.approved_by === "auto" ? `<span class="chip auto right" title="Approved automatically (auto_approve in inbox/config.json)">auto-approved</span>` : ""}
       ${dismissHint && editable ? `<span class="chip dismiss right" title="${esc(a.note)}">suggest: dismiss</span>` : ""}
     </div>
     <label>They wrote</label>
@@ -111,6 +113,7 @@ function card(a) {
     ${a.note ? `<div class="sub">${esc(a.note)}</div>` : ""}
     ${dismissHint && editable ? `<div class="warn">They seem to be ${a.intent === "stop" ? "asking not to be contacted" : "declining"}. Dismissing is suggested; if you answer anyway, keep it short and don't pitch.</div>` : ""}
     ${LABEL[a.status] ? `<div class="status">${esc(LABEL[a.status])}</div>` : ""}
+    ${a.approved_by === "auto" && a.status === "approved" ? `<div class="sub">Approved automatically: a short answer with the booking link. Unapprove it to review it yourself before a sender picks it up.</div>` : ""}
     ${a.reason && a.status !== "drafted" ? `<div class="sub">${esc(a.reason)}</div>` : ""}
     <label>Our answer <span class="count" data-count></span></label>
     <textarea data-field="text" ${editable ? "" : "readonly"} placeholder="${dismissHint ? "No answer drafted. Dismiss, or write one." : ""}">${esc(a.text)}</textarea>
@@ -125,7 +128,10 @@ function card(a) {
   </article>`;
 }
 function render() {
-  $("#note").textContent = data.note || "";
+  const au = data.auto || {};
+  $("#note").textContent = (data.note || "") + (au.enabled ? (au.active
+    ? ` Auto-approve is on: ${au.today}/${au.max_per_day} today.`
+    : ` Auto-approve is waiting: ${au.why}.`) : "");
   renderTabs();
   const items = data.entries.filter(a => inTab(tab, a));
   $("#list").innerHTML = items.length ? items.map(card).join("")

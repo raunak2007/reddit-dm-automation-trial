@@ -1,0 +1,4 @@
+# secrets: the SMTP password and the Google service-account key (any JSON here but config.json)
+.env
+*.json
+!config.json

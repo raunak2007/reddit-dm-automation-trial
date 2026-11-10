@@ -1,0 +1,4 @@
+# Only the Google Sheet sync needs these (the email digest is stdlib only).
+# google-auth signs in as the service account; its AuthorizedSession is a requests.Session.
+google-auth>=2.20
+requests>=2.28

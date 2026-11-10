@@ -24,12 +24,15 @@ class Daily(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name)
         self.ran = self.dir / "ran.txt"
-        self.notes = []
+        self.notes, self.damaged, self.backed_up, self.livechecks = [], [], [], []
         for p in (mock.patch.object(daily, "HERE", self.dir), mock.patch.object(daily, "CONFIG", self.dir / "s.json"),
                   mock.patch.object(daily, "LOGS", self.dir / "logs"), mock.patch.object(daily, "PAUSED", self.dir / "logs" / "paused.json"),
                   mock.patch.object(daily, "PYTHON", Path(sys.executable)),
                   mock.patch.object(daily, "summary", lambda: "3 DMs, 0 follow-ups, 1 new replies\nreddit: 3 DMs"),
                   mock.patch.object(daily, "notify", lambda title, text: self.notes.append(title)),
+                  mock.patch.object(daily, "records_check", lambda: list(self.damaged)),
+                  mock.patch.object(daily, "make_backup", lambda skip: self.backed_up.append(skip) or "backed up"),
+                  mock.patch.object(daily, "record_livecheck", lambda name, code: self.livechecks.append((name, code))),
                   mock.patch.object(sys, "stdout", io.StringIO())):
             p.start()
             self.addCleanup(p.stop)
@@ -108,6 +111,24 @@ class Daily(unittest.TestCase):
         self.assertNotIn("facebook", daily.paused())
         self.assertIn("Outreach: facebook resumed", self.notes)
 
+    def test_damaged_record_holds_back_its_platform_and_is_not_backed_up(self):
+        self.damaged = [{"path": "facebook/data/contacted.csv", "platform": "facebook", "problem": "shrank from 9 to 1"}]
+        code = self.run_daily([self.job("facebook", "f1"), self.job("reddit", "r1")])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.ran_tags(), ["r1"])
+        self.assertIn("Outreach: a record looks damaged", self.notes)
+        self.assertEqual(self.backed_up, [{"facebook/data/contacted.csv"}], "the good copy stays the baseline")
+
+    def test_every_run_backs_up_and_live_checks_are_recorded(self):
+        self.run_daily([self.job("reddit", "check", code=0, role="livecheck", weekly=self.today())])
+        self.assertEqual(self.backed_up, [set()])
+        self.assertEqual(self.livechecks, [("reddit", 0)])
+
+    def test_a_job_using_a_stopped_platform_is_skipped(self):
+        self.run_daily([self.job("reddit", "r1", code=2), self.job("sources", "s1", uses="reddit"),
+                        self.job("insights", "i1")])
+        self.assertEqual(self.ran_tags(), ["r1", "i1"])
+
     def test_resume_by_hand(self):
         daily.set_paused("instagram", "test")
         self.run_daily([], "--resume", "instagram")
@@ -125,6 +146,33 @@ class Daily(unittest.TestCase):
         self.assertEqual(daily.cleanup(14), 1)
         self.assertFalse(old.exists())
         self.assertTrue(new.exists() and keep.exists())
+
+    def reports(self, cfg, email_code=0):
+        """A fake report/run.py in the temp folder that notes which kind ran and exits email_code for email."""
+        (self.dir / "report").mkdir(exist_ok=True)
+        (self.dir / "report" / "config.json").write_text(json.dumps(cfg))
+        (self.dir / "report" / "run.py").write_text(
+            f"import sys; open({str(self.ran)!r}, 'a').write('report-' + sys.argv[1] + chr(10)); "
+            f"raise SystemExit({email_code} if sys.argv[1] == 'email' else 0)")
+
+    def test_reports_run_after_the_summary_only_when_enabled(self):
+        self.run_daily([self.job("reddit", "r1")])
+        self.assertEqual(self.ran_tags(), ["r1"], "no report/config.json: nothing")
+        self.ran.unlink()
+        self.notes.clear()
+        self.reports({"email": {"enabled": True}, "sheet": {"enabled": False}})
+        self.assertEqual(self.run_daily([self.job("reddit", "r1")]), 0)
+        self.assertEqual(self.ran_tags(), ["r1", "report-email"])
+        self.assertEqual(self.notes, ["Outreach today"])
+        self.ran.unlink()
+        self.run_daily([self.job("reddit", "r1")], "--only", "reddit")
+        self.assertEqual(self.ran_tags(), ["r1"], "--only without report: no report")
+
+    def test_report_failure_is_notified_and_does_not_fail_the_run(self):
+        self.reports({"email": {"enabled": True}, "sheet": {"enabled": True}}, email_code=1)
+        self.assertEqual(self.run_daily([self.job("reddit", "r1")]), 0)
+        self.assertEqual(self.ran_tags(), ["r1", "report-email", "report-sheet"], "the sheet still syncs")
+        self.assertEqual(self.notes, ["Outreach: report email failed", "Outreach today"])
 
     def test_default_schedule_is_written_on_first_run(self):
         self.assertFalse(daily.CONFIG.exists())

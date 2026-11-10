@@ -13,13 +13,15 @@ before our DM. A reply is recorded once: author_key, author, post_key, seen_at, 
 their message(s) after our DM (up to store.REPLY_TEXT_MAX characters) and the chat URL.
 If our DM can't be found in the chat (not loaded, edited, deleted), that chat is left for the next run.
 
-After we answer someone from the inbox (../inbox/store.py, status 'sent'), their chat is checked again on later runs
-for anything new: each message from them after our latest message in the chat (our DM, a follow-up, an answer, or
-anything we sent by hand) becomes its own row, with a seen_at unique to that person (the inbox keys Facebook replies
-on author_key:seen_at). Messages already in data/replies.csv since our latest answer aren't recorded again, and our
-own messages never count. The chat is only trusted if one of our messages to them (the DM or an answer) is in it.
-Order within the per-run cap: people whose last recorded reply is older than our latest answer to them (waiting on
-them) first, then chats never checked, then the other answered people, most recent answer first.
+Everyone already in data/replies.csv is checked again on later runs for anything new, unless their latest inbox
+entry (../inbox/store.py) is dismissed or an answer to them is sending / uncertain: each message from them after our
+latest message in the chat (our DM, a follow-up, an answer, or anything we sent by hand) becomes its own row, with a
+seen_at unique to that person (the inbox keys Facebook replies on author_key:seen_at, and inbox/draft.py folds a new
+row into a fresh draft, replacing an untouched one). Messages already in data/replies.csv since our latest message
+aren't recorded again, and our own messages never count. The chat is only trusted if one of our messages to them (the
+DM, a follow-up or an answer) is in it. Order within the per-run cap: people with no answer sent yet (a draft waiting,
+or none), most recent reply first; then people we've answered (those whose last reply is older than our latest answer
+first); then DMed chats never checked.
 
 Opening a chat shows their messages as seen, as it would by hand. It waits outreach.reply_min_delay_seconds to
 reply_max_delay_seconds between chats, takes the same lock as send.py, and stops (exit code 2) on anything
@@ -69,42 +71,54 @@ def to_check(cfg):
 
 
 def to_recheck(cfg):
-    """[(author_key, author, post_key, dm text, since, our texts)] for everyone we've sent an answer to: since is our
-    latest answer's sent_at (new messages are looked for after our latest message in the chat), our texts are the
-    DM and every answer we sent (one of them must be in the chat to trust it). Waiting on them (their last recorded
-    reply older than our latest answer) first, then the rest; most recent answer first within each."""
-    leads, hist, out = store.load_leads(), store.history(), []
-    sent = {}
+    """(waiting_draft, answered): the people whose chat is read again for further messages, as
+    (author_key, author, post_key, dm text, since, our texts). since: when we last wrote to them that we know of
+    (new messages are looked for after our latest message in the chat; replies.csv rows from since on are already
+    recorded); our texts: what we sent them (one must be in the chat as ours to trust it).
+      waiting_draft  in replies.csv with no answer sent yet: their inbox entry is drafted / approved / failed, or
+                     there's none. since = our DM (or follow-up). Most recent reply first.
+      answered       an answer was sent (inbox status 'sent'). since = the latest answer. People whose last reply is
+                     older than that answer first, then the rest, most recent answer first.
+    People whose latest entry is dismissed, or with an answer that's sending / uncertain, are left alone."""
+    leads, hist, fus = store.load_leads(), store.history(), store.followups()
+    entries = {}
     for a in inbox.load().values():
-        if a["platform"] == "facebook" and a["status"] == "sent" and a.get("person"):
-            sent.setdefault(a["person"], []).append(a)
-    for akey, answers in sent.items():
-        answers.sort(key=lambda a: a.get("sent_at") or "")
-        since = answers[-1].get("sent_at") or answers[-1].get("created_at") or ""
+        if a["platform"] == "facebook" and a.get("person"):
+            entries.setdefault(a["person"], []).append(a)
+    replied = {r["author_key"] for r in store.reply_rows()}
+    drafts, answered = [], []
+    for akey in replied | set(entries):
+        mine = sorted(entries.get(akey, []), key=lambda a: a.get("created_at") or "")
+        sent = sorted((a for a in mine if a["status"] == "sent"), key=lambda a: a.get("sent_at") or "")
         dms = [r for r in hist.get(akey, []) if r["status"] == "sent"]
         lead = leads.get(dms[-1]["post_key"], {}) if dms else {}
         post_key = dms[-1]["post_key"] if dms else ""
-        name = lead.get("author") or answers[-1].get("name") or (dms[-1]["author"] if dms else "") or akey
-        ours = [t for t in [our_dm(lead)] + [(a.get("text") or "").strip() for a in answers] if t]
-        waiting = max((r["seen_at"] for r in store.reply_rows(akey)), default="") < since
-        out.append((waiting, (akey, name, post_key, our_dm(lead), since, ours)))
-    out.sort(key=lambda t: t[1][4], reverse=True)          # most recent answer first...
-    out.sort(key=lambda t: not t[0])                         # ...waiting on them before the rest (stable)
-    return [t[1] for t in out]
-
-
-def waiting_on(person):
-    """True if their last recorded reply is older than our latest answer (a to_recheck entry)."""
-    return max((r["seen_at"] for r in store.reply_rows(person[0])), default="") < person[4]
+        name = lead.get("author") or (mine[-1]["name"] if mine else "") or (dms[-1]["author"] if dms else "") or akey
+        last_reply = max((r["seen_at"] for r in store.reply_rows(akey)), default="")
+        if sent:
+            since = sent[-1].get("sent_at") or sent[-1].get("created_at") or ""
+            ours = [t for t in [our_dm(lead)] + [(a.get("text") or "").strip() for a in sent] if t]
+            answered.append((last_reply < since, since, (akey, name, post_key, our_dm(lead), since, ours)))
+            continue
+        if akey not in replied or any(a["status"] in ("sending", "uncertain") for a in mine) or \
+                (mine and mine[-1]["status"] == "dismissed") or not dms:
+            continue
+        ups = [r for r in fus.get(akey, []) if r["status"] in store.FOLLOWUP_COUNTED]
+        since = max([dms[-1]["timestamp"]] + [r["timestamp"] for r in ups])
+        ours = [t for t in [our_dm(lead)] + [r["note"] for r in ups if r["status"] == "followup_submitting"] if t]
+        drafts.append((last_reply, (akey, name, post_key, our_dm(lead), since, ours)))
+    drafts.sort(key=lambda t: t[0], reverse=True)
+    answered.sort(key=lambda t: t[1], reverse=True)      # most recent answer first...
+    answered.sort(key=lambda t: not t[0])                 # ...waiting on them before the rest (stable)
+    return [t[-1] for t in drafts], [t[-1] for t in answered]
 
 
 def plan(cfg):
-    """Every chat to open this run, before the per-run cap: waiting answered people, never-checked DMs, the rest."""
-    again = to_recheck(cfg)
-    waiting = [p for p in again if waiting_on(p)]
-    rest = [p for p in again if p not in waiting]
+    """Every chat to open this run, before the per-run cap: people with an answer still to send (a waiting draft,
+    or none yet), then people we've answered, then DMed chats never checked."""
+    drafts, answered = to_recheck(cfg)
     seen, out = set(), []
-    for p in waiting + to_check(cfg) + rest:
+    for p in drafts + answered + to_check(cfg):
         if p[0] not in seen:
             seen.add(p[0])
             out.append(p)
@@ -224,7 +238,7 @@ def recheck_one(driver, person, counts, open_chat, read):
     """Re-read one answered person's chat and record each new message from them. 'halt' on an account-wide stop."""
     akey, name, post_key, dm, since, ours = person
     url = store.messenger_url(akey)
-    print(f"[+] {name or akey} (answered {since}; looking for anything new)")
+    print(f"[+] {name or akey} (looking for anything new since {since})")
     try:
         open_chat(driver, url, name or akey)
         recorded = [r["text"] for r in store.reply_rows(akey) if r["seen_at"] >= since]

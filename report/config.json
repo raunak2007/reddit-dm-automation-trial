@@ -1,0 +1,16 @@
+{
+  "email": {
+    "enabled": false,
+    "to": ["you@example.com"],
+    "from": "you@gmail.com",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "username": "you@gmail.com",
+    "max_replies": 20
+  },
+  "sheet": {
+    "enabled": false,
+    "spreadsheet_id": "",
+    "credentials_file": "service_account.json"
+  }
+}

@@ -10,7 +10,8 @@ schedule.py installs this as a daily launchd job; it is also fine to run it your
 run in its own folder with this repo's venv Python (so each folder's .env and config.json apply), one at a
 time, since they drive Chrome and two at once would fight over a profile. Output goes to logs/<date>.log.
 
-Jobs with "weekly": "<day>" run only on that weekday. A job with "role": "livecheck" is that platform's
+Jobs with "weekly": "<day>" run only on that weekday; one with "uses": "<platform>" (it opens that platform's
+profile) is skipped whenever that platform stopped or is paused. A job with "role": "livecheck" is that platform's
 read-only check against the real site (it types and sends nothing). It runs before the platform's other jobs
 on its weekly day, and every day while the platform is paused. If it fails, the platform is paused (logs/paused.json):
 its jobs are skipped, every day, until a live check passes again or you --resume it, because a site that
@@ -21,7 +22,14 @@ rest of that platform's jobs are skipped today, the other platforms still run, a
 notification, since only you can fix those. Any other failure (a crash, a timeout) is notified too. At the
 end: a summary notification (outcomes.summary(): today's DMs, follow-ups, replies, bookings, answers waiting
 for you), also written to logs/summary-<date>.txt, and failure screenshots / page dumps older than
-cleanup_days are deleted.
+cleanup_days are deleted. Then report/run.py email and sheet (the email digest and Google Sheet sync), each
+only if report/config.json enables it; a failure there is notified but doesn't change the exit code.
+
+Records: before any job, backup.check() compares every send record with the newest backup. A platform whose
+record shrank, vanished or stopped parsing is skipped today (with a notification), since a damaged
+contacted.csv could mean messaging people twice. After the jobs, backup.py copies the records into
+backups/<date>/ (kept 30 days), leaving damaged ones out so the last good copy stays the baseline. Each live
+check's result goes to logs/livecheck.json for setup_check.py.
 Exit code: 2 if any job stopped on an account problem or a platform is paused, 1 if any failed otherwise, else 0.
 """
 from __future__ import annotations
@@ -67,6 +75,8 @@ DEFAULT = {
         {"name": "inbox", "dir": ".", "run": ["inbox/run.py", "draft"], "enabled": True},
         {"name": "bookings", "dir": ".", "run": ["bookings/run.py", "calendly"], "enabled": False},
         {"name": "insights", "dir": ".", "run": ["insights/run.py"], "weekly": "monday", "enabled": True},
+        {"name": "sources", "dir": ".", "run": ["insights/sources.py"], "weekly": "monday", "uses": "reddit",
+         "enabled": True},
     ],
 }
 
@@ -146,6 +156,55 @@ def cleanup(days: int) -> int:
     return n
 
 
+def records_check() -> list[dict]:
+    """backup.check(): send records that shrank, vanished or broke since the newest backup."""
+    try:
+        import backup
+        return backup.check()
+    except Exception as exc:                         # never let the guard itself stop the run
+        print(f"[!] couldn't check the records against the backups: {exc}")
+        return []
+
+
+def make_backup(skip: set) -> str:
+    """Tonight's copy of the records (backup.py), leaving damaged ones out. Returns a line for the log."""
+    try:
+        import backup
+        dest, copied, pruned = backup.backup(skip=skip)
+        return f"backed up {copied} records to {dest.relative_to(HERE)}" + (f", pruned {pruned} old" if pruned else "")
+    except Exception as exc:
+        notify("Outreach: backup failed", f"{type(exc).__name__}: {exc}")
+        return f"backup FAILED: {exc}"
+
+
+def record_livecheck(name, code):
+    """Note the result where setup_check.py looks (logs/livecheck.json)."""
+    try:
+        import setup_check
+        setup_check.LIVECHECKS = LOGS / "livecheck.json"
+        setup_check.record_livecheck(name, code)
+    except Exception as exc:
+        print(f"[!] couldn't record the live check: {exc}")
+
+
+def send_reports(log, logname: str):
+    """After the summary: report/run.py email and report/run.py sheet, each only if report/config.json turns it
+    on ("enabled": true). A failure is notified and logged, never fails the run."""
+    try:
+        cfg = json.loads((HERE / "report" / "config.json").read_text())
+    except OSError:
+        return
+    except ValueError as exc:
+        notify("Outreach: report failed", f"report/config.json isn't valid JSON: {exc}")
+        return
+    for kind in ("email", "sheet"):
+        if (cfg.get(kind) or {}).get("enabled"):
+            code = run_job({"name": "report", "dir": ".", "run": ["report/run.py", kind]}, log, 600)
+            if code != 0:
+                notify(f"Outreach: report {kind} failed",
+                       f"report/run.py {kind} {'timed out' if code is None else f'exited {code}'}. See logs/{logname}.")
+
+
 def summary() -> str:
     try:
         import outcomes
@@ -183,8 +242,17 @@ def main():
     path = LOGS / f"{date.today().isoformat()}.log"
     timeout = cfg.get("timeout_minutes", 120) * 60
     stopped, failed = set(), []
+    damaged = records_check()
+    for p in damaged:                               # a damaged send record could mean messaging people twice
+        stopped.add(p["platform"])
+    if damaged:
+        notify("Outreach: a record looks damaged",
+               "; ".join(f"{p['path']} {p['problem']}" for p in damaged)[:200] +
+               ". Those platforms won't run until it's fixed: python backup.py check")
     with open(path, "a") as log:
         log.write(f"\n########## daily.py {datetime.now().isoformat(timespec='seconds')}\n")
+        for p in damaged:
+            log.write(f"[!] {p['path']}: {p['problem']} -> {p['platform']} skipped today (python backup.py check)\n")
         jobs = [j for j in picked if due(j, today, j["name"] in held)]
         # a platform's live check goes first among its jobs
         jobs.sort(key=lambda j: (picked.index(next(k for k in picked if k["name"] == j["name"])),
@@ -194,12 +262,17 @@ def main():
             if name in stopped:
                 log.write(f"\n===== skipped {label(job)}: {name} stopped earlier today\n")
                 continue
+            uses = job.get("uses")                 # a job that opens another platform's profile (e.g. its Chrome)
+            if uses and (uses in stopped or uses in paused()):
+                log.write(f"\n===== skipped {label(job)}: it uses {uses}, which stopped or is paused today\n")
+                continue
             if name in paused() and job.get("role") != "livecheck":
                 log.write(f"\n===== skipped {label(job)}: {name} is paused ({paused()[name]['why']})\n")
                 continue
             print(f"[+] {label(job)}")
             code = run_job(job, log, timeout)
             if job.get("role") == "livecheck":
+                record_livecheck(name, code)
                 if code == 0:
                     if name in paused():
                         set_paused(name)
@@ -221,8 +294,11 @@ def main():
                 notify(f"Outreach: {name} failed",
                        f"{label(job)} {'timed out' if code is None else f'exited {code}'}. See logs/{path.name}.")
         removed = cleanup(cfg.get("cleanup_days", 14))
+        log.write(f"\n===== {make_backup({p['path'] for p in damaged})}\n")
         text = summary()
         log.write(f"\n===== summary\n{text}\n===== removed {removed} old failure screenshots/dumps\n")
+        if only is None or "report" in only:
+            send_reports(log, path.name)
     (LOGS / f"summary-{date.today().isoformat()}.txt").write_text(text + "\n")
     head, _, rest = text.partition("\n")
     notify("Outreach today", head + (f" ({', '.join(rest.splitlines()[3:])})" if len(rest.splitlines()) > 3 else ""))

@@ -8,3 +8,4 @@ contacted.csv
 step*_failed_dom.txt
 study_sessions.db
 logs/
+backups/

@@ -35,6 +35,11 @@ def stats() -> dict:
         new = sum(g["platform"] == p for g in waiting)
         print(f"{p:<10}" + "".join(f"{table[p][s]:>11}" for s in shown) + f"{new:>8}")
     dismiss = sum(a.get("suggest") == "dismiss" and a["status"] == "drafted" for a in answers)
+    cfg = draft.load_config()
+    ac, (on, why) = draft.auto_cfg(cfg), draft.gate(cfg)
+    print(f"Reviewed by you: {store.reviewed_count()} (auto-approve needs {ac['min_reviewed']})")
+    print(f"Auto-approve: {'ACTIVE' if on else 'inactive (' + why + ')'}; today {store.auto_approved_today()}/"
+          f"{ac['max_per_day']}; intents {', '.join(ac['intents'])}")
     print(f"\n'new' = conversations with replies not drafted yet (python inbox/run.py draft)."
           f"{f' {dismiss} drafted entries are suggested for dismissal.' if dismiss else ''}")
     return table

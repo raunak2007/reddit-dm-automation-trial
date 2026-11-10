@@ -43,7 +43,12 @@ def _port() -> int:
 def state() -> dict:
     entries = sorted(store.load().values(), key=lambda a: a.get("received_at") or a["created_at"], reverse=True)
     counts = {s: sum(a["status"] == s for a in entries) for s in store.STATUSES}
-    return {"entries": entries, "counts": counts, "note": NOTE, "editable": list(store.EDITABLE)}
+    cfg = draft.load_config()
+    on, why = draft.gate(cfg)
+    ac = draft.auto_cfg(cfg)
+    auto = {"enabled": ac["enabled"], "active": on, "why": why, "reviewed": store.reviewed_count(),
+            "min_reviewed": ac["min_reviewed"], "today": store.auto_approved_today(), "max_per_day": ac["max_per_day"]}
+    return {"entries": entries, "counts": counts, "note": NOTE, "editable": list(store.EDITABLE), "auto": auto}
 
 
 def _id(body: dict) -> str:
@@ -63,7 +68,7 @@ def _text(body: dict) -> str:
 
 
 def edit(body):
-    return store.update(_id(body), expect=store.EDITABLE, text=_text(body))
+    return store.update(_id(body), expect=store.EDITABLE, text=_text(body), edited_by_you=True)
 
 
 def approve(body):
@@ -71,15 +76,16 @@ def approve(body):
     text = _text(body) if "text" in body else (store.get(aid) or {}).get("text", "")
     if not text.strip():
         raise TypeError("the answer is empty; write one, or dismiss it")
-    return store.update(aid, expect=store.EDITABLE, status="approved", text=text, reason="")
+    return store.update(aid, expect=store.EDITABLE, status="approved", text=text, reason="", approved_by="you")
 
 
 def unapprove(body):
-    return store.update(_id(body), expect=("approved",), status="drafted", approved_at="")
+    return store.update(_id(body), expect=("approved",), status="drafted", approved_at="", approved_by="")
 
 
 def dismiss(body):
-    return store.update(_id(body), expect=store.EDITABLE, status="dismissed", reason="dismissed on the page")
+    return store.update(_id(body), expect=store.EDITABLE, status="dismissed", reason="dismissed on the page",
+                        dismissed_by="you")
 
 
 def restore(body):

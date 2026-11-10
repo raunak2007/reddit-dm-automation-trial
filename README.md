@@ -34,6 +34,30 @@ Held sends settle themselves too: each run reads the sent folder first, so a hel
 recorded `sent`, and one the folder shows never went out is cleared and sent again (`"auto_resolve": true`,
 the default). A held send is only cleared once the listing reaches back past it and it's 15 minutes old.
 
+## What's left to set up
+
+```bash
+venv/bin/python setup_check.py          # one checklist for every platform: OK / TODO / NOTE (opens nothing)
+venv/bin/python setup_check.py --live   # also run each platform's read-only live check (opens Chrome, types nothing)
+```
+
+It lists what each platform still needs: login, sender account, Claude key, business details, live-check
+settings and the last passing live check. It also flags any feature switched on before it's safe:
+follow-ups, automatic comments and automatic answers all need a passing live check first. Then come the
+schedule, backups, email/Sheet updates and booking import. It exits 1 while anything is TODO.
+
+## Backups of the send records
+
+The `contacted.csv` files (and replies, follow-ups, leads, answers, bookings) are what stop anyone being
+messaged twice, and they aren't in git. `daily.py` copies them to `backups/<date>/` every run and keeps 30
+days. Before any job it compares them with the newest backup. If a record shrank, vanished or stopped parsing,
+that platform is skipped and you're notified, and the damaged file never replaces the last good copy.
+
+```bash
+venv/bin/python backup.py check | list | restore <date> [path]   # restore keeps the current file as *.before-restore-*
+venv/bin/python backup.py          # back up now (after a change you meant, this makes it the new baseline)
+```
+
 ## Reddit lead finder (`reddit/`)
 
 `reddit/` finds recent posts in admissions subreddits (r/ApplyingToCollege, r/scholarships, ...). Claude scores
@@ -84,6 +108,10 @@ relies on reply detection being right.
   unclear is left for `bookings/run.py link`.
 - `python outcomes.py` shows contacted / followed up / replied / answered / booked per platform; `--today` is
   the daily summary.
+- `python insights/sources.py` (weekly) writes `insights/reports/sources-<date>.md`: how each subreddit, group,
+  keyword and Instagram account performs, new subreddits (from Reddit's search, read-only) and keywords worth
+  adding, and phrases to search Facebook groups with. The config snippets in it are never applied for you, and
+  you join groups yourself.
 - `python insights/run.py` (weekly) writes `insights/reports/<date>.md`: reply and booking rates by platform,
   score, category and source, with example messages and suggested prompt edits from Claude. It never edits a
   prompt; copy in what you agree with.
@@ -111,3 +139,21 @@ macOS notification. A crash or timeout is notified too. Turn a job off with `"en
 wake. Set up and log in to each platform once (its README) before installing it, or that platform will notify a
 failure every day.
 
+
+## Updates away from the Mac (`report/`)
+
+The summary notification only shows on the Mac. `report/` sends the same news elsewhere:
+
+```bash
+venv/bin/python report/run.py email --dry-run   # print today's digest; drop --dry-run to send it
+venv/bin/python report/run.py sheet --dry-run   # print the People / Daily rows; drop --dry-run to sync the sheet
+```
+
+- **Email digest**: today's numbers per platform and in total, new replies (first name or username, a snippet of at
+  most 120 characters, a link to the chat), answers waiting for review, and anything paused or stopped. Mondays add
+  the insights report's headline numbers. Sent over SMTP with STARTTLS (Gmail: an app password in `report/.env`).
+- **Google Sheet**: a "People" tab (everyone contacted, rewritten each sync) and a "Daily" tab (one row per day per
+  platform, updated in place), written as a Google service account the sheet is shared with.
+
+Both are off until you set `"enabled": true` for them in `report/config.json`; then `daily.py` runs them after its
+summary and notifies you if one fails (the run itself isn't affected). Setup: [report/README.md](report/README.md).

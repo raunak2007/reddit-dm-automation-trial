@@ -58,8 +58,11 @@ TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "intent": {"type": "string", "enum": ["question", "interested", "thanks", "declined", "stop", "other"],
-                       "description": "What their message(s) amount to"},
+            "intent": {"type": "string", "enum": ["booking", "question", "interested", "thanks", "declined", "stop",
+                                                    "other"],
+                       "description": "What their message(s) amount to. booking: they only want to book the "
+                                      "call or get the link (\"yes I'd like the call\", \"how do I book?\", "
+                                      "\"send me the link\"), nothing else to answer"},
             "suggest_dismiss": {"type": "boolean",
                                 "description": "True if they declined or asked not to be contacted"},
             "reason": {"type": "string", "description": "One sentence: what they want and why this answer"},
@@ -158,36 +161,50 @@ def _sent_rows(platform: str, who_field: str, person: str) -> list[dict]:
             if r.get("status") == "sent" and (r.get(who_field) or "").strip().lower().removeprefix("u/") == want]
 
 
+def _minor(lead: dict | None) -> bool | None:
+    """The lead's ai.likely_minor, or None when it's unknown (no lead, no ai block, or the check didn't run)."""
+    a = (lead or {}).get("ai")
+    if not isinstance(a, dict) or not isinstance(a.get("likely_minor"), bool):
+        return None
+    if str(a.get("minor_evidence") or "").strip().lower() == "not checked":
+        return None
+    return a["likely_minor"]
+
+
 def original(platform: str, person: str, reply: dict | None = None) -> dict:
     """{'message': our DM to them ('' if it can't be found), 'name': a better display name or '', 'sent': whether
-    contacted.csv records it sent}."""
+    contacted.csv records it sent, 'minor': the lead's ai.likely_minor (None if unknown: no lead, not checked)}."""
     leads = _json(PATHS[platform]["leads"])
     key = person.strip().lower().removeprefix("u/")
     if platform == "reddit":
         mine = [l for l in leads.values() if isinstance(l, dict)
                 and (l.get("author") or "").strip().lower().removeprefix("u/") == key]
         mine.sort(key=lambda l: (bool(l.get("approved")), str(l.get("created_at") or "")))
-        msgs = [m for m in (_dm_of(l, "message", "dm") for l in reversed(mine)) if m]
-        return {"message": msgs[0] if msgs else "", "name": "",
-                "sent": bool(_sent_rows("reddit", "username", person))}
+        found = [l for l in reversed(mine) if _dm_of(l, "message", "dm")]
+        return {"message": _dm_of(found[0], "message", "dm") if found else "", "name": "",
+                "sent": bool(_sent_rows("reddit", "username", person)), "minor": _minor(found[0] if found else None)}
     if platform == "facebook":
         sent = _sent_rows("facebook", "author_key", person)
         keys = [(reply or {}).get("extra", {}).get("post_key")] + [r.get("post_key") for r in reversed(sent)]
         for k in keys:
             if k and k in leads and _dm_of(leads[k], "dm"):
-                return {"message": _dm_of(leads[k], "dm"), "name": leads[k].get("author") or "", "sent": bool(sent)}
+                return {"message": _dm_of(leads[k], "dm"), "name": leads[k].get("author") or "", "sent": bool(sent),
+                        "minor": _minor(leads[k])}
         for l in leads.values():
             if isinstance(l, dict) and (l.get("author_key") or "").lower() == key and _dm_of(l, "dm"):
-                return {"message": _dm_of(l, "dm"), "name": l.get("author") or "", "sent": bool(sent)}
-        return {"message": "", "name": "", "sent": bool(sent)}
+                return {"message": _dm_of(l, "dm"), "name": l.get("author") or "", "sent": bool(sent),
+                        "minor": _minor(l)}
+        return {"message": "", "name": "", "sent": bool(sent), "minor": None}
     sent = _sent_rows("instagram", "username", person)
     for k in [r.get("lead_key") for r in reversed(sent)]:
         if k and k in leads and _dm_of(leads[k], "dm"):
-            return {"message": _dm_of(leads[k], "dm"), "name": leads[k].get("full_name") or "", "sent": True}
+            return {"message": _dm_of(leads[k], "dm"), "name": leads[k].get("full_name") or "", "sent": True,
+                    "minor": _minor(leads[k])}
     for l in leads.values():
         if isinstance(l, dict) and (l.get("username") or "").lower() == key and _dm_of(l, "dm"):
-            return {"message": _dm_of(l, "dm"), "name": l.get("full_name") or "", "sent": bool(sent)}
-    return {"message": "", "name": "", "sent": bool(sent)}
+            return {"message": _dm_of(l, "dm"), "name": l.get("full_name") or "", "sent": bool(sent),
+                    "minor": _minor(l)}
+    return {"message": "", "name": "", "sent": bool(sent), "minor": None}
 
 
 # ----------------------------------------------------------------- grouping
@@ -348,6 +365,11 @@ def draft_group(cl, cfg: dict, system: str, g: dict) -> dict | None:
                          reason=f"replaced by {entry['id']}: they wrote again")
         except (KeyError, ValueError):
             pass
+    if entry and auto_cfg(cfg)["enabled"]:
+        entry, why = maybe_auto_approve(cfg, entry, orig.get("minor"),
+                                        " ".join(r["text"] for r in g["replies"]))
+        if why:
+            entry = store.update(entry["id"], auto_skip=why)
     return entry
 
 
@@ -378,6 +400,87 @@ def redraft(aid: str, hint: str = "", cl=None, cfg: dict | None = None) -> dict:
                         suggest=d["suggest"], intent=d["intent"], note=d["reason"], reason="")
 
 
+# ----------------------------------------------------------------- auto-approval (config auto_approve, off by default)
+AUTO_DEFAULTS = {"enabled": False, "intents": ["booking"], "min_reviewed": 30, "max_per_day": 5,
+                 "max_answer_words": 60, "max_message_words": 40}
+URL = re.compile(r"https?://\S+")
+BOOKING_ASK = re.compile(r"\b(book|booking|link|call|schedul\w*|sign (me )?up|slot|time|when can|zoom|meet)\b", re.I)
+
+
+def auto_cfg(cfg: dict) -> dict:
+    return {**AUTO_DEFAULTS, **(cfg.get("auto_approve") or {})}
+
+
+def gate(cfg: dict) -> tuple[bool, str]:
+    """(active, why not): enabled, and you've reviewed at least min_reviewed drafts yourself."""
+    ac = auto_cfg(cfg)
+    if not ac["enabled"]:
+        return False, "auto_approve.enabled is false"
+    n = store.reviewed_count()
+    if n < ac["min_reviewed"]:
+        return False, f"you've reviewed {n} of the {ac['min_reviewed']} drafts it needs first"
+    return True, ""
+
+
+def has_booking_link(text: str, link: str) -> bool:
+    """The booking link is in the text, tagged with utm parameters (tagged()) or not."""
+    from urllib.parse import urlsplit
+    want = urlsplit(link)
+    for u in URL.findall(text or ""):
+        got = urlsplit(u.rstrip(".,;:!)\"'"))
+        if (got.netloc.lower(), got.path.rstrip("/"), got.fragment) == \
+                (want.netloc.lower(), want.path.rstrip("/"), want.fragment):
+            return True
+    return False
+
+
+def auto_refusal(cfg: dict, entry: dict, minor: bool | None, newest: str) -> str | None:
+    """Why this fresh entry may NOT be auto-approved, or None if every condition holds. newest: the text of the
+    messages this answer is for (their_message, without the timestamps)."""
+    ac = auto_cfg(cfg)
+    ok, why = gate(cfg)
+    if not ok:
+        return why
+    if entry.get("suggest") == "dismiss":
+        return "they seem to decline"
+    if entry.get("intent") not in ac["intents"]:
+        return f"intent {entry.get('intent')!r} isn't in auto_approve.intents"
+    if minor is None:
+        return "can't tell whether they're under 18"
+    if minor:
+        return "they may be under 18"
+    text = entry.get("text") or ""
+    if not text.strip() or len(text.split()) > ac["max_answer_words"]:
+        return f"the answer is empty or longer than {ac['max_answer_words']} words"
+    if not has_booking_link(text, cfg["business"]["booking_link"]):
+        return "the answer doesn't have the booking link"
+    if "?" in URL.sub("", text):
+        return "the answer asks a question"
+    if len(newest.split()) > ac["max_message_words"]:
+        return f"their message is longer than {ac['max_message_words']} words"
+    asks = [q for q in re.findall(r"[^.!?\n]*\?", URL.sub("", newest))]
+    if any(not BOOKING_ASK.search(q) for q in asks):
+        return "they ask something besides booking"
+    others = [a for a in store.of_person(entry["platform"], entry["person"]) if a["id"] != entry["id"]]
+    if any(a["status"] in ("approved", "sending", "sent", "uncertain") for a in others):
+        return "we've already answered them (or an answer is waiting to go out)"
+    if store.auto_approved_today() >= ac["max_per_day"]:
+        return f"already {ac['max_per_day']} auto-approved today (auto_approve.max_per_day)"
+    return None
+
+
+def maybe_auto_approve(cfg: dict, entry: dict, minor: bool | None, newest: str) -> tuple[dict, str | None]:
+    """Approve a fresh draft as approved_by='auto' when auto_refusal finds nothing. Returns (entry, why not)."""
+    why = auto_refusal(cfg, entry, minor, newest)
+    if why:
+        return entry, why
+    try:
+        return store.update(entry["id"], expect=("drafted",), status="approved", approved_by="auto",
+                            auto_approved_at=store.now()), None
+    except (KeyError, ValueError) as exc:
+        return entry, str(exc)
+
+
 # ----------------------------------------------------------------- the run
 def run(limit: int | None = None, dry_run: bool = False, cl=None, cfg: dict | None = None) -> list[dict]:
     cfg = cfg or load_config()
@@ -385,6 +488,11 @@ def run(limit: int | None = None, dry_run: bool = False, cl=None, cfg: dict | No
     cap = cfg["ai"].get("max_drafts_per_run", 40) if limit is None else limit
     batch = todo[:cap]
     system = system_prompt(cfg)
+    if auto_cfg(cfg)["enabled"]:
+        on, why = gate(cfg)
+        ac = auto_cfg(cfg)
+        print(f"[auto-approve] active: {', '.join(ac['intents'])} answers only, {store.auto_approved_today()}/"
+              f"{ac['max_per_day']} today" if on else f"[auto-approve] inactive: {why}")
     if dry_run:
         print(system, "\n\n----- first conversation -----\n")
         if batch:
@@ -421,7 +529,10 @@ def run(limit: int | None = None, dry_run: bool = False, cl=None, cfg: dict | No
             continue
         if entry:
             made.append(entry)
-            tag = "suggest dismiss" if entry.get("suggest") == "dismiss" else entry.get("intent", "")
+            tag = ("suggest dismiss" if entry.get("suggest") == "dismiss" else
+                   "AUTO-APPROVED" if entry.get("approved_by") == "auto" else entry.get("intent", ""))
             print(f"[{i}/{len(batch)}] {g['platform']:<9} {entry['name']:<26} {tag}")
-    print(f"[done] {len(made)} drafts. Review them: python inbox/run.py serve")
+    auto = sum(e.get("approved_by") == "auto" for e in made)
+    print(f"[done] {len(made)} drafts{f', {auto} auto-approved (sent by python <platform>/run.py answer)' if auto else ''}."
+          f" Review them: python inbox/run.py serve")
     return made

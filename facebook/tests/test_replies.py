@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import unittest
+from types import SimpleNamespace
 from datetime import datetime, timedelta
 
 from helpers import FakeChrome, StoreTest, config, lead
@@ -241,8 +242,109 @@ class AfterOurAnswer(StoreTest):
         self.assertEqual([p[0] for p in plan], [self.l["author_key"], other["author_key"]])
         self.assertEqual(len(plan[0]), 6, "a re-check carries since and our texts")
         self.check([me(DM), them("How much is it?"), me(ANSWER), them("Tuesday works!")], only_them=True)
-        self.assertEqual([p[0] for p in replies.plan(config())], [other["author_key"], self.l["author_key"]],
-                         "they've answered our answer: never-checked chats come first now")
+        self.assertEqual([p[0] for p in replies.plan(config())], [self.l["author_key"], other["author_key"]],
+                         "answered people still come before never-checked chats")
+
+
+def load_draft():
+    """inbox/draft.py, imported with its own `import store` meaning inbox/store.py (here `store` is facebook's)."""
+    import sys
+    from inbox import store as inbox_store
+    mine = sys.modules["store"]
+    sys.modules["store"] = inbox_store
+    try:
+        from inbox import draft
+    finally:
+        sys.modules["store"] = mine
+    assert draft.store is inbox_store
+    return draft
+
+
+class BeforeWeAnswer(StoreTest):
+    """Someone with a recorded reply and no answer sent yet is checked again; a further message gets its own row,
+    and the next inbox draft covers the whole conversation."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(messenger, "SETTLE", 0)
+        self.l = lead(1)
+        self.l["approved"]["dm"] = DM
+        store.save_leads({self.l["post_key"]: self.l})
+        store.record(self.l["author_key"], self.l["author"], self.l["post_key"], "sent", "fake: sent")
+
+    def check(self, rows):
+        driver = FakeChrome({store.messenger_url(self.l["author_key"]): {
+            "text": f"{self.l['author']} {DM}", "composer": True, "rows": rows}})
+        counts = replies.check_loop(driver, replies.plan(config()), config())
+        self.assertEqual(driver.box.typed, [])
+        return counts
+
+    def texts(self):
+        return [r["text"] for r in store.reply_rows(self.l["author_key"])]
+
+    def test_a_further_message_before_our_answer_gets_its_own_row_once(self):
+        self.check([me(DM), them("How much is it?")])
+        self.check([me(DM), them("How much is it?")])
+        self.assertEqual(self.texts(), ["How much is it?"], "nothing new: no row")
+        chat = [me(DM), them("How much is it?"), them("Also, do you help with essays?")]
+        self.assertEqual(self.check(chat)["new_messages"], 1)
+        self.check(chat)
+        self.assertEqual(self.texts(), ["How much is it?", "Also, do you help with essays?"])
+        seen = [r["seen_at"] for r in store.reply_rows(self.l["author_key"])]
+        self.assertEqual(len(set(seen)), 2)
+
+    def test_dismissed_or_uncertain_answers_are_left_alone(self):
+        self.check([me(DM), them("How much is it?")])
+        a = self.inbox.add_draft("facebook", "x", person=self.l["author_key"], name="", chat_url="",
+                                 their_message="", our_message="", draft="d")
+        for status, rechecked in (("drafted", True), ("approved", True), ("failed", True), ("dismissed", False),
+                                  ("uncertain", False)):
+            self.inbox.update(a["id"], status=status)
+            self.assertEqual(self.l["author_key"] in [p[0] for p in replies.plan(config())], rechecked, status)
+
+    def test_waiting_drafts_then_answered_then_never_checked(self):
+        waiting, answered_, fresh = lead(2), lead(3), lead(4)
+        store.save_leads({**store.load_leads(), **{l["post_key"]: l for l in (waiting, answered_, fresh)}})
+        for l in (waiting, answered_, fresh):
+            store.record(l["author_key"], l["author"], l["post_key"], "sent", "fake: sent")
+        for l in (waiting, answered_):
+            store.record_reply(l["author_key"], l["author"], l["post_key"], "hi", "u", text="hi")
+        a = self.inbox.add_draft("facebook", f"{answered_['author_key']}:x", person=answered_["author_key"],
+                                 name="", chat_url="", their_message="hi", our_message="", draft="answer")
+        self.inbox.update(a["id"], status="sent")
+        order = [p[0] for p in replies.plan(config())]
+        self.assertEqual(order[:2], [waiting["author_key"], answered_["author_key"]])
+        self.assertEqual(set(order[2:]), {fresh["author_key"], self.l["author_key"]}, "never-checked chats last")
+
+    def test_end_to_end_the_redraft_covers_both_messages(self):
+        draft = load_draft()
+        self.patch(draft, "PATHS", {**draft.PATHS, "facebook": {"replies": store.REPLIES, "leads": store.LEADS,
+                                                                "contacted": store.CONTACTED}})
+        asked = []
+
+        def create(**kw):
+            asked.append(kw["messages"][0]["content"])
+            return SimpleNamespace(content=[SimpleNamespace(type="tool_use", input={
+                "intent": "question", "suggest_dismiss": False, "reason": "price", "answer": f"answer {len(asked)}"})])
+
+        cl = SimpleNamespace(messages=SimpleNamespace(create=create))
+        cfg = draft.load_config()
+
+        self.check([me(DM), them("How much is it?")])
+        first, = draft.run(cl=cl, cfg=cfg)
+        self.assertEqual(first["their_message"], "How much is it?")
+
+        self.check([me(DM), them("How much is it?"), them("Also, do you help with essays?")])
+        second, = draft.run(cl=cl, cfg=cfg)
+        ids = [f"{r['author_key']}:{r['seen_at']}" for r in store.reply_rows(self.l["author_key"])]
+        self.assertEqual(second["covers"], ids, "the new draft covers both messages")
+        self.assertIn("How much is it?", second["their_message"])
+        self.assertIn("Also, do you help with essays?", second["their_message"])
+        self.assertIn("Also, do you help with essays?", asked[-1])
+        self.assertIn("How much is it?", asked[-1])
+        old = self.inbox.get(first["id"])
+        self.assertEqual(old["status"], "dismissed", "the untouched first draft is replaced")
+        self.assertEqual(draft.run(cl=cl, cfg=cfg), [], "nothing new: nothing drafted")
 
 
 if __name__ == "__main__":

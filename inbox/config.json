@@ -20,5 +20,15 @@
   },
   "server": {
     "port": 8767
+  },
+  "auto_approve": {
+    "enabled": false,
+    "intents": [
+      "booking"
+    ],
+    "min_reviewed": 30,
+    "max_per_day": 5,
+    "max_answer_words": 60,
+    "max_message_words": 40
   }
 }

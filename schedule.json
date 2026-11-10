@@ -167,6 +167,16 @@
       ],
       "weekly": "monday",
       "enabled": true
+    },
+    {
+      "name": "sources",
+      "dir": ".",
+      "run": [
+        "insights/sources.py"
+      ],
+      "weekly": "monday",
+      "uses": "reddit",
+      "enabled": true
     }
   ]
 }

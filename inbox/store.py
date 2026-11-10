@@ -158,6 +158,9 @@ def answered(platform: str, person: str) -> bool:
 #                  (status stays 'drafted' until you choose, so answered() doesn't count it)
 #     intent       what Claude (or the decline check) read the message as: question / interested / declined / stop /
 #                  other
+#     approved_by  "you" (the page) or "auto" (draft.py's auto_approve); entries approved before this field
+#                  existed count as "you"
+#     edited_by_you / dismissed_by   set by the page when you edit / dismiss an entry
 #     note         Claude's one-line reading of the message (reason stays for the senders' failed / uncertain notes)
 #     received_at  when their newest message came
 #     kind, subject, post_key   platform details (Reddit: message / comment_reply ...; Facebook: the post we DMed about)
@@ -209,3 +212,22 @@ def covered(platform: str) -> set[str]:
 def of_person(platform: str, person: str) -> list[dict]:
     """This person's entries, oldest first."""
     return [a for a in load().values() if a["platform"] == platform and a["person"].lower() == person.lower()]
+
+
+def reviewed_by_you(a: dict) -> bool:
+    """You approved, edited or dismissed this entry yourself on the page (auto-approvals don't count)."""
+    by = a.get("approved_by")
+    approved_by_you = by == "you" or (by is None and bool(a.get("approved_at")))
+    return approved_by_you or bool(a.get("edited_by_you")) or a.get("dismissed_by") == "you"
+
+
+def reviewed_count() -> int:
+    """How many entries you've reviewed by hand: the trust gate for auto-approval."""
+    return sum(reviewed_by_you(a) for a in load().values())
+
+
+def auto_approved_today() -> int:
+    """Entries auto-approved since local midnight, whatever became of them since (unapproved ones too)."""
+    today = datetime.now().date().isoformat()
+    return sum(str(a.get("auto_approved_at") or "").startswith(today)
+               for a in load().values())
